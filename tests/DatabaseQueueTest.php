@@ -443,6 +443,15 @@ test('DatabaseQueue uses transactions for pop', function () {
                 throw $e;
             }
         }
+
+        public function transactionLevel(): int
+        {
+            return 0;
+        }
+
+        public function afterCommit(callable $callback): void {}
+
+        public function afterRollback(callable $callback): void {}
     };
 
     $queue = createTestQueue($connection, $envelope);

@@ -124,4 +124,29 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
             throw $e;
         }
     }
+
+    public function transactionLevel(): int
+    {
+        return $this->pdo->inTransaction() ? 1 : 0;
+    }
+
+    public function afterCommit(
+        callable $callback,
+    ): void {
+        if (!$this->pdo->inTransaction()) {
+            $callback();
+
+            return;
+        }
+
+        throw new LogicException('SqliteConnection does not queue after-commit callbacks');
+    }
+
+    public function afterRollback(
+        callable $callback,
+    ): void {
+        if ($this->pdo->inTransaction()) {
+            throw new LogicException('SqliteConnection does not queue after-rollback callbacks');
+        }
+    }
 }
