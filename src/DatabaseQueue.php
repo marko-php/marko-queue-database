@@ -8,19 +8,41 @@ use DateTimeImmutable;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\TransactionInterface;
 use Marko\Queue\Exceptions\SerializationException;
+use Marko\Queue\FailedJob;
+use Marko\Queue\FailedJobRepositoryInterface;
 use Marko\Queue\JobEnvelope;
 use Marko\Queue\JobInterface;
 use Marko\Queue\QueueInterface;
 use Random\RandomException;
 
+/**
+ * Database-backed queue.
+ *
+ * Attempt counting: the `attempts` column is the authoritative count. Every
+ * reservation increments it, so it counts attempts *started*, including ones
+ * whose worker died mid-run (fatal error, OOM, SIGKILL) and never released the
+ * job. The `attempts` value inside the serialized payload lags behind and is
+ * brought up to the column value whenever the job is popped or released:
+ *
+ * - pop() hands the worker a job whose attempts equal the reservations made
+ *   before this one. The worker then increments it for the current run.
+ * - release() rewrites the payload with the column value, so the count
+ *   survives the round trip through the table.
+ * - A popped job whose earlier reservations already reach its max attempts
+ *   (job maxAttempts, or the queue default) is moved to the failed-job store
+ *   instead of being returned, so a job that always crashes its worker cannot
+ *   be retried forever.
+ */
 readonly class DatabaseQueue implements QueueInterface
 {
     public function __construct(
         private ConnectionInterface $connection,
         private JobEnvelope $jobEnvelope,
+        private FailedJobRepositoryInterface $failedJobRepository,
         private string $table = 'jobs',
         private string $defaultQueue = 'default',
         private int $retryAfter = 90,
+        private int $maxAttempts = 3,
     ) {}
 
     /**
@@ -64,7 +86,7 @@ readonly class DatabaseQueue implements QueueInterface
                 'id' => $id,
                 'queue' => $queue ?? $this->defaultQueue,
                 'payload' => $this->jobEnvelope->wrap($job->serialize()),
-                'attempts' => 0,
+                'attempts' => $job->attempts,
                 'reserved_at' => null,
                 'available_at' => $availableAt->format('Y-m-d H:i:s'),
                 'created_at' => $now->format('Y-m-d H:i:s'),
@@ -100,20 +122,27 @@ readonly class DatabaseQueue implements QueueInterface
     ): ?JobInterface {
         $queueName = $queue ?? $this->defaultQueue;
 
-        // Use transaction if the connection supports it
-        if ($this->connection instanceof TransactionInterface) {
-            return $this->connection->transaction(fn () => $this->popJob($queueName));
-        }
+        // A false result means the reserved job had exhausted its attempts through
+        // crashed reservations and was moved to the failed-job store; try the next one.
+        do {
+            $result = $this->connection instanceof TransactionInterface
+                ? $this->connection->transaction(fn (): JobInterface|false|null => $this->reserveNext($queueName))
+                : $this->reserveNext($queueName);
+        } while ($result === false);
 
-        return $this->popJob($queueName);
+        return $result;
     }
 
     /**
+     * Reserve the next available job.
+     *
+     * @return JobInterface|false|null the reserved job, null when none is available, or
+     *                                 false when the reserved job was moved to failed jobs
      * @throws SerializationException
      */
-    private function popJob(
+    private function reserveNext(
         string $queueName,
-    ): ?JobInterface {
+    ): JobInterface|false|null {
         $now = new DateTimeImmutable();
         $reclaimCutoff = $now->modify("-$this->retryAfter seconds");
 
@@ -135,7 +164,7 @@ readonly class DatabaseQueue implements QueueInterface
         $row = $rows[0];
 
         $affectedRows = $this->connection->execute(
-            "UPDATE $this->table SET reserved_at = :reserved_at WHERE id = :id AND (reserved_at IS NULL OR reserved_at <= :reclaim_cutoff)",
+            "UPDATE $this->table SET reserved_at = :reserved_at, attempts = attempts + 1 WHERE id = :id AND (reserved_at IS NULL OR reserved_at <= :reclaim_cutoff)",
             [
                 'reserved_at' => $now->format('Y-m-d H:i:s'),
                 'id' => $row['id'],
@@ -147,9 +176,55 @@ readonly class DatabaseQueue implements QueueInterface
             return null;
         }
 
-        /** @var JobInterface $job */
-        $job = unserialize($this->jobEnvelope->verifyAndUnwrap($row['payload']));
+        $job = $this->unwrapJob($row['payload'], (int) $row['attempts']);
         $job->setId($row['id']);
+
+        $maxAttempts = $job->maxAttempts ?? $this->maxAttempts;
+
+        if ($job->attempts >= $maxAttempts) {
+            $this->failExhaustedJob($job, $row['queue'], $maxAttempts, $now);
+
+            return false;
+        }
+
+        return $job;
+    }
+
+    /**
+     * @throws SerializationException
+     */
+    private function failExhaustedJob(
+        JobInterface $job,
+        string $queueName,
+        int $maxAttempts,
+        DateTimeImmutable $now,
+    ): void {
+        $this->failedJobRepository->store(new FailedJob(
+            id: $job->id,
+            queue: $queueName,
+            payload: $this->jobEnvelope->wrap($job->serialize()),
+            exception: "Job $job->id exceeded max attempts after worker crash or timeout: "
+                . "$job->attempts of $maxAttempts attempts were reserved without being completed or released.",
+            failedAt: $now,
+        ));
+        $this->delete($job->id);
+    }
+
+    /**
+     * Verify and unserialize a stored payload, bringing its attempt count up to the given floor.
+     *
+     * @throws SerializationException
+     */
+    private function unwrapJob(
+        string $payload,
+        int $attempts,
+    ): JobInterface {
+        /** @var JobInterface $job */
+        $job = unserialize($this->jobEnvelope->verifyAndUnwrap($payload));
+
+        while ($job->attempts < $attempts) {
+            $job->incrementAttempts();
+        }
 
         return $job;
     }
@@ -205,16 +280,36 @@ readonly class DatabaseQueue implements QueueInterface
         return $affectedRows > 0;
     }
 
+    /**
+     * Release a reserved job back to the queue, persisting its attempt count in the payload.
+     *
+     * @throws SerializationException
+     */
     public function release(
         string $jobId,
         int $delay = 0,
     ): bool {
+        $rows = $this->connection->query(
+            "SELECT payload, attempts FROM $this->table WHERE id = :id",
+            [
+                'id' => $jobId,
+            ],
+        );
+
+        if ($rows === []) {
+            return false;
+        }
+
+        $job = $this->unwrapJob($rows[0]['payload'], (int) $rows[0]['attempts']);
+
         $now = new DateTimeImmutable();
         $availableAt = $delay > 0 ? $now->modify("+$delay seconds") : $now;
 
         $affectedRows = $this->connection->execute(
-            "UPDATE $this->table SET reserved_at = :reserved_at, available_at = :available_at WHERE id = :id",
+            "UPDATE $this->table SET payload = :payload, attempts = :attempts, reserved_at = :reserved_at, available_at = :available_at WHERE id = :id",
             [
+                'payload' => $this->jobEnvelope->wrap($job->serialize()),
+                'attempts' => $job->attempts,
                 'reserved_at' => null,
                 'available_at' => $availableAt->format('Y-m-d H:i:s'),
                 'id' => $jobId,

@@ -7,6 +7,7 @@ use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
 use Marko\Encryption\Config\EncryptionConfig;
 use Marko\Queue\Database\DatabaseQueue;
+use Marko\Queue\Database\Tests\Fixtures\InMemoryFailedJobRepository;
 use Marko\Queue\Database\Tests\Fixtures\TestJob;
 use Marko\Queue\Exceptions\SerializationException;
 use Marko\Queue\JobEnvelope;
@@ -21,6 +22,7 @@ function createTestQueue(
     return new DatabaseQueue(
         connection: $connection,
         jobEnvelope: $envelope ?? createTestEnvelope(),
+        failedJobRepository: new InMemoryFailedJobRepository(),
         retryAfter: $retryAfter,
     );
 }
@@ -33,7 +35,7 @@ function createTestEnvelope(
 
 test('DatabaseQueue implements QueueInterface', function () {
     $connection = $this->createMock(ConnectionInterface::class);
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
 
     expect($queue)->toBeInstanceOf(QueueInterface::class);
 });
@@ -60,7 +62,7 @@ test('DatabaseQueue push stores job in database', function () {
 
     $job = new TestJob('test message');
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $queue->push($job);
 });
 
@@ -70,7 +72,7 @@ test('DatabaseQueue push returns job ID', function () {
 
     $job = new TestJob('test message');
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $id = $queue->push($job);
 
     expect($id)->toBeString()
@@ -96,7 +98,7 @@ test('DatabaseQueue later stores job with future available_at', function () {
 
     $job = new TestJob('delayed job');
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $delay = 60; // 60 seconds
     $beforeTime = new DateTimeImmutable();
     $id = $queue->later($delay, $job);
@@ -153,7 +155,7 @@ test('DatabaseQueue pop retrieves and reserves next job', function () {
         )
         ->willReturn(1);
 
-    $queue = new DatabaseQueue($connection, $envelope);
+    $queue = createTestQueue($connection, $envelope);
     $poppedJob = $queue->pop();
 
     expect($poppedJob)->toBeInstanceOf(TestJob::class)
@@ -171,7 +173,7 @@ test('DatabaseQueue pop returns null when empty', function () {
     $connection->expects($this->never())
         ->method('execute');
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $result = $queue->pop();
 
     expect($result)->toBeNull();
@@ -190,7 +192,7 @@ test('DatabaseQueue size returns pending job count', function () {
         )
         ->willReturn([['count' => 5]]);
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $size = $queue->size();
 
     expect($size)->toBe(5);
@@ -209,7 +211,7 @@ test('DatabaseQueue clear removes all jobs', function () {
         )
         ->willReturn(10);
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $cleared = $queue->clear();
 
     expect($cleared)->toBe(10);
@@ -228,7 +230,7 @@ test('DatabaseQueue delete removes specific job', function () {
         )
         ->willReturn(1);
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $deleted = $queue->delete('job-123');
 
     expect($deleted)->toBeTrue();
@@ -241,7 +243,7 @@ test('DatabaseQueue delete returns false when job not found', function () {
         ->method('execute')
         ->willReturn(0);
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $deleted = $queue->delete('nonexistent-job');
 
     expect($deleted)->toBeFalse();
@@ -249,6 +251,10 @@ test('DatabaseQueue delete returns false when job not found', function () {
 
 test('DatabaseQueue release updates job availability', function () {
     $connection = $this->createMock(ConnectionInterface::class);
+
+    $connection->method('query')->willReturn([
+        ['payload' => createTestEnvelope()->wrap(new TestJob()->serialize()), 'attempts' => 1],
+    ]);
 
     $capturedBindings = [];
     $connection->expects($this->once())
@@ -267,7 +273,7 @@ test('DatabaseQueue release updates job availability', function () {
         )
         ->willReturn(1);
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $beforeTime = new DateTimeImmutable();
     $released = $queue->release('job-123', 30);
     $afterTime = new DateTimeImmutable();
@@ -285,6 +291,10 @@ test('DatabaseQueue release updates job availability', function () {
 test('DatabaseQueue release with zero delay makes job immediately available', function () {
     $connection = $this->createMock(ConnectionInterface::class);
 
+    $connection->method('query')->willReturn([
+        ['payload' => createTestEnvelope()->wrap(new TestJob()->serialize()), 'attempts' => 1],
+    ]);
+
     $capturedBindings = [];
     $connection->expects($this->once())
         ->method('execute')
@@ -298,7 +308,7 @@ test('DatabaseQueue release with zero delay makes job immediately available', fu
         )
         ->willReturn(1);
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $beforeTime = new DateTimeImmutable();
     $released = $queue->release('job-123');
     $afterTime = new DateTimeImmutable();
@@ -315,11 +325,11 @@ test('DatabaseQueue release with zero delay makes job immediately available', fu
 test('DatabaseQueue release returns false when job not found', function () {
     $connection = $this->createMock(ConnectionInterface::class);
 
-    $connection->expects($this->once())
-        ->method('execute')
-        ->willReturn(0);
+    $connection->method('query')->willReturn([]);
+    $connection->expects($this->never())
+        ->method('execute');
 
-    $queue = new DatabaseQueue($connection, createTestEnvelope());
+    $queue = createTestQueue($connection);
     $released = $queue->release('nonexistent-job');
 
     expect($released)->toBeFalse();
@@ -435,7 +445,7 @@ test('DatabaseQueue uses transactions for pop', function () {
         }
     };
 
-    $queue = new DatabaseQueue($connection, $envelope);
+    $queue = createTestQueue($connection, $envelope);
     $poppedJob = $queue->pop();
 
     expect($poppedJob)->not->toBeNull();
@@ -496,7 +506,7 @@ test('DatabaseQueue respects available_at for delayed jobs', function () {
 
     $connection->method('execute')->willReturn(1);
 
-    $queue = new DatabaseQueue($connection, $envelope);
+    $queue = createTestQueue($connection, $envelope);
     $poppedJob = $queue->pop();
 
     expect($poppedJob)->not->toBeNull()
@@ -528,7 +538,7 @@ test('it verifies the envelope before unserializing in DatabaseQueue::pop()', fu
     ]);
     $connection->method('execute')->willReturn(1);
 
-    $queue = new DatabaseQueue($connection, $envelope);
+    $queue = createTestQueue($connection, $envelope);
 
     /** @var TestJob $popped */
     $popped = $queue->pop();
@@ -558,60 +568,10 @@ test('it rejects a tampered DatabaseQueue payload before unserializing', functio
     ]);
     $connection->method('execute')->willReturn(1);
 
-    $queue = new DatabaseQueue($connection, $envelope);
+    $queue = createTestQueue($connection, $envelope);
 
     expect(fn () => $queue->pop())->toThrow(SerializationException::class);
 });
-
-it(
-    'reaches maxAttempts after exactly maxAttempts executions (job moves to failed store on the Nth, not the (N-1)th, failure)',
-    function (): void {
-        $envelope = createTestEnvelope();
-        $connection = $this->createMock(ConnectionInterface::class);
-
-        $job = new TestJob('maxAttempts test');
-        $job->setId('job-max');
-        $wrappedPayload = $envelope->wrap($job->serialize());
-
-        $connection->method('query')->willReturn([
-            [
-                'id' => 'job-max',
-                'queue' => 'default',
-                'payload' => $wrappedPayload,
-                'attempts' => 0,
-                'reserved_at' => null,
-                'available_at' => '2024-01-01 00:00:00',
-                'created_at' => '2024-01-01 00:00:00',
-            ],
-        ]);
-        $connection->method('execute')->willReturn(1);
-
-        $queue = createTestQueue($connection, $envelope);
-
-        /** @var TestJob $poppedJob */
-        $poppedJob = $queue->pop();
-        $maxAttempts = $poppedJob->maxAttempts;
-
-        expect($poppedJob)->not->toBeNull()
-            ->and($poppedJob->attempts)->toBe(0, 'Fresh pop should have attempts=0 (DB no longer increments)');
-
-        // Simulate Worker calling incrementAttempts() on each execution failure
-        for ($execution = 1; $execution <= $maxAttempts - 1; $execution++) {
-            $poppedJob->incrementAttempts();
-            // Before the Nth execution, job.attempts < maxAttempts → should not fail permanently
-            expect($poppedJob->attempts < $poppedJob->maxAttempts)->toBeTrue(
-                "After $execution execution(s), should not yet reach maxAttempts",
-            );
-        }
-
-        // On the Nth execution, Worker increments to maxAttempts → store as failed
-        $poppedJob->incrementAttempts();
-        expect($poppedJob->attempts)->toBe($maxAttempts)
-            ->and($poppedJob->attempts >= $poppedJob->maxAttempts)->toBeTrue(
-                'After maxAttempts executions, job should be stored as failed (not on N-1)',
-            );
-    },
-);
 
 it(
     'counts exactly one attempt per execution (popping then processing a job once yields attempts == 1, not 2)',
@@ -921,7 +881,7 @@ test('it round-trips a legitimate job through DatabaseQueue push and pop', funct
         }
     };
 
-    $queue = new DatabaseQueue($connection, $envelope);
+    $queue = createTestQueue($connection, $envelope);
 
     $job = new TestJob('round-trip message');
     $pushedId = $queue->push($job);
