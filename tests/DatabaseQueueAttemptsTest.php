@@ -10,6 +10,7 @@ use Marko\Queue\Database\Tests\Fixtures\AlwaysFailingJob;
 use Marko\Queue\Database\Tests\Fixtures\SqliteConnection;
 use Marko\Queue\Database\Tests\Fixtures\TestJob;
 use Marko\Queue\JobEnvelope;
+use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
 
 function attemptsEnvelope(): JobEnvelope
@@ -28,6 +29,7 @@ function attemptsQueue(
         jobEnvelope: attemptsEnvelope(),
         failedJobRepository: new DatabaseFailedJobRepository($connection),
         queryBuilderFactory: new PgSqlQueryBuilderFactory($connection),
+        clock: new FakeClock(),
         maxAttempts: $maxAttempts,
     );
 }

@@ -18,7 +18,9 @@ use Marko\Queue\Exceptions\NoDriverException;
 use Marko\Queue\FailedJobRepositoryInterface;
 use Marko\Queue\QueueInterface;
 use Marko\Queue\WorkerInterface;
+use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
+use Psr\Clock\ClockInterface;
 
 /**
  * Container wired the way an app with only marko/queue + marko/queue-database is:
@@ -32,6 +34,7 @@ function workerTestContainer(
     $container->instance(ContainerInterface::class, $container);
     $container->instance(ConnectionInterface::class, $connection);
     $container->instance(QueryBuilderFactoryInterface::class, new PgSqlQueryBuilderFactory($connection));
+    $container->instance(ClockInterface::class, new FakeClock());
     $container->instance(ConfigRepositoryInterface::class, new FakeConfigRepository([
         'encryption.key' => 'worker-regression-key',
         'queue.driver' => 'database',

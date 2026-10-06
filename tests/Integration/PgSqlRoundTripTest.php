@@ -19,6 +19,7 @@ use Marko\Queue\Database\Tests\Fixtures\PrivateStateJob;
 use Marko\Queue\JobEnvelope;
 use Marko\Queue\QueueConfig;
 use Marko\Queue\Worker;
+use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
 
 /*
@@ -102,6 +103,7 @@ function pgsqlQueue(
         jobEnvelope: pgsqlEnvelope(),
         failedJobRepository: new DatabaseFailedJobRepository($connection),
         queryBuilderFactory: new PgSqlQueryBuilderFactory($connection),
+        clock: new FakeClock(),
         maxAttempts: 1,
     );
 }
@@ -149,6 +151,7 @@ describe('database queue on PostgreSQL', function (): void {
             ])),
             pgsqlEnvelope(),
             new Container(),
+            new FakeClock(),
         );
         $worker->work(once: true);
 

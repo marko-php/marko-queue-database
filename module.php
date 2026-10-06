@@ -11,6 +11,7 @@ use Marko\Queue\FailedJobRepositoryInterface;
 use Marko\Queue\JobEnvelope;
 use Marko\Queue\QueueConfig;
 use Marko\Queue\QueueInterface;
+use Psr\Clock\ClockInterface;
 
 return [
     'bindings' => [
@@ -22,6 +23,7 @@ return [
                 jobEnvelope: $container->get(JobEnvelope::class),
                 failedJobRepository: $container->get(FailedJobRepositoryInterface::class),
                 queryBuilderFactory: $container->get(QueryBuilderFactoryInterface::class),
+                clock: $container->get(ClockInterface::class),
                 defaultQueue: $config->queue(),
                 retryAfter: $config->retryAfter(),
                 maxAttempts: $config->maxAttempts(),

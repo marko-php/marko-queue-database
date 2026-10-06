@@ -15,20 +15,27 @@ use Marko\Queue\Database\Tests\Fixtures\TestJob;
 use Marko\Queue\Exceptions\SerializationException;
 use Marko\Queue\JobEnvelope;
 use Marko\Queue\QueueInterface;
+use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
 use PHPUnit\Framework\MockObject\MockObject;
+use Psr\Clock\ClockInterface;
 
 function createTestQueue(
     ConnectionInterface $connection,
     ?JobEnvelope $envelope = null,
     int $retryAfter = 90,
+    ClockInterface $clock = new FakeClock('2026-10-05 12:00:00'),
+    int $maxAttempts = 3,
+    ?InMemoryFailedJobRepository $failedJobRepository = null,
 ): DatabaseQueue {
     return new DatabaseQueue(
         connection: $connection,
         queryBuilderFactory: new PgSqlQueryBuilderFactory($connection),
         jobEnvelope: $envelope ?? createTestEnvelope(),
-        failedJobRepository: new InMemoryFailedJobRepository(),
+        failedJobRepository: $failedJobRepository ?? new InMemoryFailedJobRepository(),
+        clock: $clock,
         retryAfter: $retryAfter,
+        maxAttempts: $maxAttempts,
     );
 }
 
@@ -114,20 +121,12 @@ test('DatabaseQueue later stores job with future available_at', function () {
 
     $job = new TestJob('delayed job');
 
-    $queue = createTestQueue($connection);
-    $delay = 60; // 60 seconds
-    $beforeTime = new DateTimeImmutable();
-    $id = $queue->later($delay, $job);
-    $afterTime = new DateTimeImmutable();
+    $queue = createTestQueue($connection, clock: new FakeClock('2026-10-05 12:00:00'));
+    $id = $queue->later(60, $job);
 
-    expect($id)->toBeString();
-
-    $availableAt = new DateTimeImmutable($capturedBindings['available_at']);
-    $expectedMin = $beforeTime->modify('+59 seconds');
-    $expectedMax = $afterTime->modify('+61 seconds');
-
-    expect($availableAt >= $expectedMin)->toBeTrue('available_at should be at least 59 seconds in future')
-        ->and($availableAt <= $expectedMax)->toBeTrue('available_at should be at most 61 seconds in future');
+    expect($id)->toBeString()
+        ->and($capturedBindings['available_at'])->toBe('2026-10-05 12:01:00')
+        ->and($capturedBindings['created_at'])->toBe('2026-10-05 12:00:00');
 });
 
 test('DatabaseQueue pop retrieves and reserves next job', function () {
@@ -295,19 +294,11 @@ test('DatabaseQueue release updates job availability', function () {
         )
         ->willReturn(1);
 
-    $queue = createTestQueue($connection);
-    $beforeTime = new DateTimeImmutable();
+    $queue = createTestQueue($connection, clock: new FakeClock('2026-10-05 12:00:00'));
     $released = $queue->release('job-123', 30);
-    $afterTime = new DateTimeImmutable();
 
-    expect($released)->toBeTrue();
-
-    $availableAt = new DateTimeImmutable($capturedBindings['available_at']);
-    $expectedMin = $beforeTime->modify('+29 seconds');
-    $expectedMax = $afterTime->modify('+31 seconds');
-
-    expect($availableAt >= $expectedMin)->toBeTrue()
-        ->and($availableAt <= $expectedMax)->toBeTrue();
+    expect($released)->toBeTrue()
+        ->and($capturedBindings['available_at'])->toBe('2026-10-05 12:00:30');
 });
 
 test('DatabaseQueue release with zero delay makes job immediately available', function () {
@@ -330,18 +321,11 @@ test('DatabaseQueue release with zero delay makes job immediately available', fu
         )
         ->willReturn(1);
 
-    $queue = createTestQueue($connection);
-    $beforeTime = new DateTimeImmutable();
+    $queue = createTestQueue($connection, clock: new FakeClock('2026-10-05 12:00:00'));
     $released = $queue->release('job-123');
-    $afterTime = new DateTimeImmutable();
 
-    expect($released)->toBeTrue();
-
-    $availableAt = new DateTimeImmutable($capturedBindings['available_at']);
-
-    // Allow 1 second tolerance for timing differences
-    expect($availableAt->getTimestamp())->toBeGreaterThanOrEqual($beforeTime->getTimestamp() - 1)
-        ->and($availableAt->getTimestamp())->toBeLessThanOrEqual($afterTime->getTimestamp() + 1);
+    expect($released)->toBeTrue()
+        ->and($capturedBindings['available_at'])->toBe('2026-10-05 12:00:00');
 });
 
 test('DatabaseQueue release returns false when job not found', function () {
@@ -505,9 +489,7 @@ test('DatabaseQueue respects available_at for delayed jobs', function () {
     $job = new TestJob('delayed job test');
     $wrappedPayload = $envelope->wrap($job->serialize());
 
-    // Create two jobs: one immediately available, one delayed (future available_at)
-    $now = new DateTimeImmutable();
-    $pastTime = $now->modify('-1 minute')->format('Y-m-d H:i:s');
+    $pastTime = '2026-10-05 11:59:00';
 
     // Capture the query bindings to verify the available_at condition
     $capturedQuery = [];
@@ -523,9 +505,8 @@ test('DatabaseQueue respects available_at for delayed jobs', function () {
             $this->callback(function (array $bindings) use (&$capturedQuery) {
                 $capturedQuery['bindings'] = $bindings;
 
-                // Must bind the current time to compare against available_at
-                return in_array(new DateTimeImmutable()->format('Y-m-d H:i:s'), $bindings, true)
-                    || in_array(new DateTimeImmutable('-1 second')->format('Y-m-d H:i:s'), $bindings, true);
+                // Must bind the clock's current time to compare against available_at
+                return in_array('2026-10-05 12:00:00', $bindings, true);
             }),
         )
         ->willReturn([
@@ -658,12 +639,11 @@ it(
 
 it('does not reclaim a job whose reservation is within the retry_after window', function (): void {
     $connection = SqliteConnection::withQueueTables();
-    $queue = createTestQueue($connection, retryAfter: 90);
-    $id = $queue->push(new TestJob('recent reservation'));
-    $connection->execute(
-        'UPDATE jobs SET reserved_at = :reserved_at WHERE id = :id',
-        ['reserved_at' => new DateTimeImmutable('-1 second')->format('Y-m-d H:i:s'), 'id' => $id],
-    );
+    $clock = new FakeClock('2026-10-05 12:00:00');
+    $queue = createTestQueue($connection, retryAfter: 90, clock: $clock);
+    $queue->push(new TestJob('recent reservation'));
+    $queue->pop();
+    $clock->travel('+89 seconds');
 
     expect($queue->pop())->toBeNull();
 });
@@ -672,12 +652,11 @@ it(
     'reclaims a job whose reservation is older than queue.retry_after and makes it available to pop() again',
     function (): void {
         $connection = SqliteConnection::withQueueTables();
-        $queue = createTestQueue($connection, retryAfter: 90);
+        $clock = new FakeClock('2026-10-05 12:00:00');
+        $queue = createTestQueue($connection, retryAfter: 90, clock: $clock);
         $id = $queue->push(new TestJob('reclaim test'));
-        $connection->execute(
-            'UPDATE jobs SET reserved_at = :reserved_at WHERE id = :id',
-            ['reserved_at' => new DateTimeImmutable('-91 seconds')->format('Y-m-d H:i:s'), 'id' => $id],
-        );
+        $queue->pop();
+        $clock->travel('+91 seconds');
 
         expect($queue->pop()?->id)->toBe($id);
     },
@@ -787,4 +766,96 @@ test('it round-trips a legitimate job through DatabaseQueue push and pop', funct
     expect($poppedJob)->toBeInstanceOf(TestJob::class)
         ->and($poppedJob->message)->toBe('round-trip message')
         ->and($poppedJob->id)->toBe($pushedId);
+});
+
+describe('DatabaseQueue clock', function (): void {
+    it('stores available_at and created_at from the injected clock', function (): void {
+        $connection = SqliteConnection::withQueueTables();
+        $queue = createTestQueue($connection, clock: new FakeClock('2026-10-05 12:00:00'));
+
+        $id = $queue->later(120, new TestJob('timed'));
+        $row = $connection->query('SELECT available_at, created_at FROM jobs WHERE id = :id', ['id' => $id])[0];
+
+        expect($row['available_at'])->toBe('2026-10-05 12:02:00')
+            ->and($row['created_at'])->toBe('2026-10-05 12:00:00');
+    });
+
+    it('does not pop a delayed job until the clock reaches its available time', function (): void {
+        $connection = SqliteConnection::withQueueTables();
+        $clock = new FakeClock('2026-10-05 12:00:00');
+        $queue = createTestQueue($connection, clock: $clock);
+        $id = $queue->later(60, new TestJob('delayed'));
+
+        $clock->travel('+59 seconds');
+        $beforeAvailable = $queue->pop();
+        $clock->travel('+1 second');
+        $onceAvailable = $queue->pop();
+
+        expect($beforeAvailable)->toBeNull()
+            ->and($onceAvailable?->id)->toBe($id);
+    });
+
+    it('reclaims a reserved job once the clock reaches retry_after', function (): void {
+        $connection = SqliteConnection::withQueueTables();
+        $clock = new FakeClock('2026-10-05 12:00:00');
+        $queue = createTestQueue($connection, retryAfter: 30, clock: $clock);
+        $id = $queue->push(new TestJob('stuck'));
+        $queue->pop();
+
+        $clock->travel('+29 seconds');
+        $withinWindow = $queue->pop();
+        $clock->travel('+1 second');
+        $afterWindow = $queue->pop();
+
+        expect($withinWindow)->toBeNull()
+            ->and($afterWindow?->id)->toBe($id);
+    });
+
+    it('counts only jobs available at the clock time in size', function (): void {
+        $connection = SqliteConnection::withQueueTables();
+        $clock = new FakeClock('2026-10-05 12:00:00');
+        $queue = createTestQueue($connection, clock: $clock);
+        $queue->push(new TestJob('now'));
+        $queue->later(300, new TestJob('later'));
+
+        $sizeNow = $queue->size();
+        $clock->travel('+5 minutes');
+
+        expect($sizeNow)->toBe(1)
+            ->and($queue->size())->toBe(2);
+    });
+
+    it('schedules a released job relative to the injected clock', function (): void {
+        $connection = SqliteConnection::withQueueTables();
+        $clock = new FakeClock('2026-10-05 12:00:00');
+        $queue = createTestQueue($connection, clock: $clock);
+        $id = $queue->push(new TestJob('retry me'));
+        $queue->pop();
+        $clock->travel('+10 seconds');
+
+        $queue->release($id, 45);
+        $row = $connection->query('SELECT available_at, reserved_at FROM jobs WHERE id = :id', ['id' => $id])[0];
+
+        expect($row['available_at'])->toBe('2026-10-05 12:00:55')
+            ->and($row['reserved_at'])->toBeNull();
+    });
+
+    it('stamps failedAt from the injected clock when a reclaimed job exhausts its attempts', function (): void {
+        $connection = SqliteConnection::withQueueTables();
+        $clock = new FakeClock('2026-10-05 12:00:00');
+        $failed = new InMemoryFailedJobRepository();
+        $queue = createTestQueue(
+            $connection,
+            retryAfter: 30,
+            clock: $clock,
+            maxAttempts: 1,
+            failedJobRepository: $failed,
+        );
+        $id = $queue->push(new TestJob('crashes its worker'));
+        $queue->pop();
+        $clock->travel('+31 seconds');
+
+        expect($queue->pop())->toBeNull()
+            ->and($failed->find($id)?->failedAt)->toEqual(new DateTimeImmutable('2026-10-05 12:00:31'));
+    });
 });

@@ -15,6 +15,7 @@ use Marko\Queue\FailedJobRepositoryInterface;
 use Marko\Queue\JobEnvelope;
 use Marko\Queue\JobInterface;
 use Marko\Queue\QueueInterface;
+use Psr\Clock\ClockInterface;
 use Random\RandomException;
 
 /**
@@ -49,6 +50,7 @@ readonly class DatabaseQueue implements QueueInterface
         private JobEnvelope $jobEnvelope,
         private FailedJobRepositoryInterface $failedJobRepository,
         private QueryBuilderFactoryInterface $queryBuilderFactory,
+        private ClockInterface $clock,
         private string $table = 'jobs',
         private string $defaultQueue = 'default',
         private int $retryAfter = 90,
@@ -87,7 +89,7 @@ readonly class DatabaseQueue implements QueueInterface
         $id = $this->generateId();
         $job->setId($id);
 
-        $now = new DateTimeImmutable();
+        $now = $this->clock->now();
         $availableAt = $delay > 0 ? $now->modify("+$delay seconds") : $now;
 
         $this->connection->execute(
@@ -153,7 +155,7 @@ readonly class DatabaseQueue implements QueueInterface
     private function reserveNext(
         string $queueName,
     ): JobInterface|false|null {
-        $now = new DateTimeImmutable();
+        $now = $this->clock->now();
         $reclaimCutoff = $now->modify("-$this->retryAfter seconds");
 
         $row = $this->queryBuilderFactory->create()
@@ -241,7 +243,7 @@ readonly class DatabaseQueue implements QueueInterface
         ?string $queue = null,
     ): int {
         $queueName = $queue ?? $this->defaultQueue;
-        $now = new DateTimeImmutable();
+        $now = $this->clock->now();
 
         $rows = $this->connection->query(
             "SELECT COUNT(*) as count FROM $this->table WHERE queue = :queue AND reserved_at IS NULL AND available_at <= :now",
@@ -302,7 +304,7 @@ readonly class DatabaseQueue implements QueueInterface
 
         $job = $this->unwrapJob($rows[0]['payload'], (int) $rows[0]['attempts']);
 
-        $now = new DateTimeImmutable();
+        $now = $this->clock->now();
         $availableAt = $delay > 0 ? $now->modify("+$delay seconds") : $now;
 
         $affectedRows = $this->connection->execute(

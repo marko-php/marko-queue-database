@@ -13,7 +13,9 @@ use Marko\Queue\Database\Tests\Fixtures\SqliteConnection;
 use Marko\Queue\Database\Tests\Fixtures\TestJob;
 use Marko\Queue\FailedJobRepositoryInterface;
 use Marko\Queue\QueueInterface;
+use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
+use Psr\Clock\ClockInterface;
 
 /**
  * Build a container wired with only the queue-database module bindings.
@@ -25,6 +27,7 @@ function queueDatabaseModuleContainer(
     $container = new Container();
     $container->instance(ConnectionInterface::class, $connection);
     $container->instance(QueryBuilderFactoryInterface::class, new PgSqlQueryBuilderFactory($connection));
+    $container->instance(ClockInterface::class, new FakeClock());
     $container->instance(ConfigRepositoryInterface::class, new FakeConfigRepository([
         'encryption.key' => 'module-test-key',
         'queue.driver' => 'database',
@@ -60,6 +63,17 @@ test('module.php binds QueueInterface to a factory that builds DatabaseQueue', f
     $container = queueDatabaseModuleContainer(SqliteConnection::withQueueTables());
 
     expect($container->get(QueueInterface::class))->toBeInstanceOf(DatabaseQueue::class);
+});
+
+test('module.php passes the container clock to DatabaseQueue', function (): void {
+    $connection = SqliteConnection::withQueueTables();
+    $container = queueDatabaseModuleContainer($connection);
+    $container->instance(ClockInterface::class, new FakeClock('2026-10-05 12:00:00'));
+
+    $id = $container->get(QueueInterface::class)->later(30, new TestJob('clocked'));
+    $row = $connection->query('SELECT available_at FROM jobs WHERE id = :id', ['id' => $id])[0];
+
+    expect($row['available_at'])->toBe('2026-10-05 12:00:30');
 });
 
 test('module.php binds FailedJobRepositoryInterface', function (): void {
