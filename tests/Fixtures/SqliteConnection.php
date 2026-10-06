@@ -128,6 +128,7 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
      */
     public function transaction(
         callable $callback,
+        int $attempts = 1,
     ): mixed {
         $this->beginTransaction();
 
