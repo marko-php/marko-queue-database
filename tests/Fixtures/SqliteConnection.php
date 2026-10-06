@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace Marko\Queue\Database\Tests\Fixtures;
 
+use Closure;
 use LogicException;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\StatementInterface;
@@ -129,6 +130,7 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
     public function transaction(
         callable $callback,
         int $attempts = 1,
+        int|Closure|null $backoff = null,
     ): mixed {
         $this->beginTransaction();
 

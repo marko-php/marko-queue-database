@@ -438,6 +438,7 @@ test('DatabaseQueue uses transactions for pop', function () {
         public function transaction(
             callable $callback,
             int $attempts = 1,
+            int|Closure|null $backoff = null,
         ): mixed {
             $this->beginTransaction();
             try {
