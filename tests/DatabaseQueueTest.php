@@ -67,11 +67,12 @@ test('DatabaseQueue implements QueueInterface', function () {
 
 test('DatabaseQueue push stores job in database', function () {
     $connection = $this->createMock(ConnectionInterface::class);
+    $connection->method('quoteIdentifier')->willReturnCallback(fn (string $name): string => "\"$name\"");
 
     $connection->expects($this->once())
         ->method('execute')
         ->with(
-            $this->stringContains('INSERT INTO jobs'),
+            $this->stringContains('INSERT INTO "jobs"'),
             $this->callback(function (array $bindings) {
                 return isset($bindings['id'])
                     && isset($bindings['queue'])
@@ -107,12 +108,13 @@ test('DatabaseQueue push returns job ID', function () {
 
 test('DatabaseQueue later stores job with future available_at', function () {
     $connection = $this->createMock(ConnectionInterface::class);
+    $connection->method('quoteIdentifier')->willReturnCallback(fn (string $name): string => "\"$name\"");
 
     $capturedBindings = [];
     $connection->expects($this->once())
         ->method('execute')
         ->with(
-            $this->stringContains('INSERT INTO jobs'),
+            $this->stringContains('INSERT INTO "jobs"'),
             $this->callback(function (array $bindings) use (&$capturedBindings) {
                 $capturedBindings = $bindings;
 

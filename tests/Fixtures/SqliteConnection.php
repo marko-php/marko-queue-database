@@ -30,6 +30,15 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
      */
     public array $lockClauses = [];
 
+    /**
+     * Every statement run through query() or execute(), in order.
+     *
+     * @var list<string>
+     */
+    public array $statements = [];
+
+    public string $identifierDelimiter = '"';
+
     private PDO $pdo;
 
     public function __construct()
@@ -44,11 +53,13 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
      * Create a connection with the jobs and failed_jobs tables. SQLite is not a supported driver, so there is no
      * generator to build them from the entities; this is the same DDL the MySQL and PostgreSQL generators write.
      */
-    public static function withQueueTables(): self
-    {
+    public static function withQueueTables(
+        string $jobsTable = 'jobs',
+    ): self {
         $connection = new self();
-        $connection->execute(<<<'SQL'
-            CREATE TABLE jobs (
+        $jobs = $connection->quoteIdentifier($jobsTable);
+        $connection->execute(<<<SQL
+            CREATE TABLE $jobs (
                 id VARCHAR(36) PRIMARY KEY,
                 queue VARCHAR(255) NOT NULL DEFAULT 'default',
                 payload TEXT NOT NULL,
@@ -58,7 +69,7 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
                 created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
             )
             SQL);
-        $connection->execute('CREATE INDEX idx_queue_available ON jobs (queue, available_at)');
+        $connection->execute("CREATE INDEX idx_queue_available ON $jobs (queue, available_at)");
         $connection->execute(<<<'SQL'
             CREATE TABLE failed_jobs (
                 id VARCHAR(36) PRIMARY KEY,
@@ -90,6 +101,7 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
             $sql = substr($sql, 0, -strlen($matches[0]));
         }
 
+        $this->statements[] = $sql;
         $statement = $this->pdo->prepare($sql);
         $statement->execute($bindings);
 
@@ -100,6 +112,7 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
         string $sql,
         array $bindings = [],
     ): int {
+        $this->statements[] = $sql;
         $statement = $this->pdo->prepare($sql);
         $statement->execute($bindings);
 
@@ -127,10 +140,16 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
         return false;
     }
 
+    /**
+     * SQLite accepts both delimiters, so a test can set $identifierDelimiter to a backtick and tell SQL quoted
+     * through the connection from SQL that picked its own delimiter.
+     */
     public function quoteIdentifier(
         string $identifier,
     ): string {
-        return '"' . str_replace('"', '""', $identifier) . '"';
+        $delimiter = $this->identifierDelimiter;
+
+        return $delimiter . str_replace($delimiter, $delimiter . $delimiter, $identifier) . $delimiter;
     }
 
     public function beginTransaction(): void

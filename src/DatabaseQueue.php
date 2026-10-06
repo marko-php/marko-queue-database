@@ -102,7 +102,7 @@ readonly class DatabaseQueue implements QueueInterface
         $availableAt = $this->secondsAfter($now, $delay);
 
         $this->connection->execute(
-            "INSERT INTO $this->table (id, queue, payload, attempts, reserved_at, available_at, created_at) VALUES (:id, :queue, :payload, :attempts, :reserved_at, :available_at, :created_at)",
+            "INSERT INTO {$this->table()} (id, queue, payload, attempts, reserved_at, available_at, created_at) VALUES (:id, :queue, :payload, :attempts, :reserved_at, :available_at, :created_at)",
             [
                 'id' => $id,
                 'queue' => $queue ?? $this->defaultQueue,
@@ -128,6 +128,15 @@ readonly class DatabaseQueue implements QueueInterface
         int $seconds,
     ): DateTimeImmutable {
         return $instant->setTimestamp($instant->getTimestamp() + $seconds);
+    }
+
+    /**
+     * The jobs table name quoted for the connection's SQL dialect, for the raw statements. reserveNext() passes the
+     * bare name to the query builder, which quotes it itself.
+     */
+    private function table(): string
+    {
+        return $this->connection->quoteIdentifier($this->table);
     }
 
     /**
@@ -199,7 +208,7 @@ readonly class DatabaseQueue implements QueueInterface
         }
 
         $affectedRows = $this->connection->execute(
-            "UPDATE $this->table SET reserved_at = :reserved_at, attempts = attempts + 1 WHERE id = :id AND (reserved_at IS NULL OR reserved_at <= :reclaim_cutoff)",
+            "UPDATE {$this->table()} SET reserved_at = :reserved_at, attempts = attempts + 1 WHERE id = :id AND (reserved_at IS NULL OR reserved_at <= :reclaim_cutoff)",
             [
                 'reserved_at' => $this->databaseTimezoneConfig->format($now),
                 'id' => $row['id'],
@@ -271,7 +280,7 @@ readonly class DatabaseQueue implements QueueInterface
         $now = $this->clock->now();
 
         $rows = $this->connection->query(
-            "SELECT COUNT(*) as count FROM $this->table WHERE queue = :queue AND reserved_at IS NULL AND available_at <= :now",
+            "SELECT COUNT(*) as count FROM {$this->table()} WHERE queue = :queue AND reserved_at IS NULL AND available_at <= :now",
             [
                 'queue' => $queueName,
                 'now' => $this->databaseTimezoneConfig->format($now),
@@ -287,7 +296,7 @@ readonly class DatabaseQueue implements QueueInterface
         $queueName = $queue ?? $this->defaultQueue;
 
         return $this->connection->execute(
-            "DELETE FROM $this->table WHERE queue = :queue",
+            "DELETE FROM {$this->table()} WHERE queue = :queue",
             [
                 'queue' => $queueName,
             ],
@@ -298,7 +307,7 @@ readonly class DatabaseQueue implements QueueInterface
         string $jobId,
     ): bool {
         $affectedRows = $this->connection->execute(
-            "DELETE FROM $this->table WHERE id = :id",
+            "DELETE FROM {$this->table()} WHERE id = :id",
             [
                 'id' => $jobId,
             ],
@@ -317,7 +326,7 @@ readonly class DatabaseQueue implements QueueInterface
         int $delay = 0,
     ): bool {
         $rows = $this->connection->query(
-            "SELECT payload, attempts FROM $this->table WHERE id = :id",
+            "SELECT payload, attempts FROM {$this->table()} WHERE id = :id",
             [
                 'id' => $jobId,
             ],
@@ -333,7 +342,7 @@ readonly class DatabaseQueue implements QueueInterface
         $availableAt = $this->secondsAfter($now, $delay);
 
         $affectedRows = $this->connection->execute(
-            "UPDATE $this->table SET payload = :payload, attempts = :attempts, reserved_at = :reserved_at, available_at = :available_at WHERE id = :id",
+            "UPDATE {$this->table()} SET payload = :payload, attempts = :attempts, reserved_at = :reserved_at, available_at = :available_at WHERE id = :id",
             [
                 'payload' => $this->jobEnvelope->wrap($job->serialize()),
                 'attempts' => $job->attempts,
