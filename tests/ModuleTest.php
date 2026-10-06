@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Marko\Config\ConfigRepositoryInterface;
 use Marko\Core\Container\Container;
+use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\PgSql\Query\PgSqlQueryBuilderFactory;
 use Marko\Database\Query\QueryBuilderFactoryInterface;
@@ -28,6 +29,7 @@ function queueDatabaseModuleContainer(
     $container->instance(ConnectionInterface::class, $connection);
     $container->instance(QueryBuilderFactoryInterface::class, new PgSqlQueryBuilderFactory($connection));
     $container->instance(ClockInterface::class, new FakeClock());
+    $container->instance(DatabaseTimezoneConfig::class, DatabaseTimezoneConfig::fromName('UTC'));
     $container->instance(ConfigRepositoryInterface::class, new FakeConfigRepository([
         'encryption.key' => 'module-test-key',
         'queue.driver' => 'database',
@@ -68,12 +70,24 @@ test('module.php binds QueueInterface to a factory that builds DatabaseQueue', f
 test('module.php passes the container clock to DatabaseQueue', function (): void {
     $connection = SqliteConnection::withQueueTables();
     $container = queueDatabaseModuleContainer($connection);
-    $container->instance(ClockInterface::class, new FakeClock('2026-10-05 12:00:00'));
+    $container->instance(ClockInterface::class, new FakeClock('2026-10-05 12:00:00+00:00'));
 
     $id = $container->get(QueueInterface::class)->later(30, new TestJob('clocked'));
     $row = $connection->query('SELECT available_at FROM jobs WHERE id = :id', ['id' => $id])[0];
 
     expect($row['available_at'])->toBe('2026-10-05 12:00:30');
+});
+
+test('module.php writes queue timestamps in the container database timezone', function (): void {
+    $connection = SqliteConnection::withQueueTables();
+    $container = queueDatabaseModuleContainer($connection);
+    $container->instance(ClockInterface::class, new FakeClock('2026-10-05 12:00:00+00:00'));
+    $container->instance(DatabaseTimezoneConfig::class, DatabaseTimezoneConfig::fromName('Europe/Berlin'));
+
+    $id = $container->get(QueueInterface::class)->later(30, new TestJob('zoned'));
+    $row = $connection->query('SELECT available_at FROM jobs WHERE id = :id', ['id' => $id])[0];
+
+    expect($row['available_at'])->toBe('2026-10-05 14:00:30');
 });
 
 test('module.php binds FailedJobRepositoryInterface', function (): void {

@@ -7,6 +7,7 @@ use Marko\Core\Command\Output;
 use Marko\Core\Container\Container;
 use Marko\Core\Path\ProjectPaths;
 use Marko\Database\Config\DatabaseConfig;
+use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
 use Marko\Database\PgSql\Query\PgSqlQueryBuilderFactory;
 use Marko\Encryption\Config\EncryptionConfig;
@@ -16,6 +17,7 @@ use Marko\Queue\Database\DatabaseQueue;
 use Marko\Queue\Database\Migration\CreateFailedJobsTable;
 use Marko\Queue\Database\Migration\CreateJobsTable;
 use Marko\Queue\Database\Tests\Fixtures\PrivateStateJob;
+use Marko\Queue\FailedJob;
 use Marko\Queue\JobEnvelope;
 use Marko\Queue\QueueConfig;
 use Marko\Queue\Worker;
@@ -97,13 +99,15 @@ function pgsqlEnvelope(): JobEnvelope
 
 function pgsqlQueue(
     PgSqlConnection $connection,
+    FakeClock $clock = new FakeClock(),
 ): DatabaseQueue {
     return new DatabaseQueue(
         connection: $connection,
         jobEnvelope: pgsqlEnvelope(),
-        failedJobRepository: new DatabaseFailedJobRepository($connection),
+        failedJobRepository: new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC')),
         queryBuilderFactory: new PgSqlQueryBuilderFactory($connection),
-        clock: new FakeClock(),
+        clock: $clock,
+        databaseTimezoneConfig: DatabaseTimezoneConfig::fromName('UTC'),
         maxAttempts: 1,
     );
 }
@@ -139,7 +143,7 @@ describe('database queue on PostgreSQL', function (): void {
         }
 
         $queue = pgsqlQueue($connection);
-        $failedJobRepository = new DatabaseFailedJobRepository($connection);
+        $failedJobRepository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
         $id = $queue->push(new PrivateStateJob('secret', 'shared', fail: true));
 
         $worker = new Worker(
@@ -226,5 +230,90 @@ describe('database queue on PostgreSQL', function (): void {
         expect($poppedByA)->not->toBeNull()
             ->and($poppedByB)->toBeNull()
             ->and($waited)->toBeLessThan(1.0);
+    });
+})->group('integration-services');
+
+/**
+ * A FakeClock reading the given UTC instant in the given timezone.
+ */
+function pgsqlZonedClock(
+    string $utcInstant,
+    string $timezone,
+): FakeClock {
+    return new FakeClock(new DateTimeImmutable($utcInstant)->setTimezone(new DateTimeZone($timezone)));
+}
+
+describe('database queue timestamps on PostgreSQL with a non-UTC PHP default timezone', function (): void {
+    beforeEach(function (): void {
+        $this->previousTimezone = date_default_timezone_get();
+        date_default_timezone_set('America/New_York');
+    });
+
+    afterEach(function (): void {
+        date_default_timezone_set($this->previousTimezone);
+    });
+
+    it('stores queue timestamps in UTC with a non-UTC PHP default timezone on PostgreSQL', function (): void {
+        ['connection' => $connection, 'skipReason' => $skipReason] = pgsqlQueueConnection();
+
+        if ($connection === null) {
+            $this->markTestSkipped($skipReason);
+        }
+
+        $queue = pgsqlQueue($connection, pgsqlZonedClock('2026-03-14T16:00:00Z', 'America/New_York'));
+        $queue->push(new PrivateStateJob('secret', 'shared'));
+        $queue->pop();
+
+        $row = $connection->query(
+            "SELECT to_char(created_at, 'YYYY-MM-DD HH24:MI:SS') AS created_at, "
+            . "to_char(available_at, 'YYYY-MM-DD HH24:MI:SS') AS available_at, "
+            . "to_char(reserved_at, 'YYYY-MM-DD HH24:MI:SS') AS reserved_at FROM jobs",
+        )[0];
+
+        expect($row['created_at'])->toBe('2026-03-14 16:00:00')
+            ->and($row['available_at'])->toBe('2026-03-14 16:00:00')
+            ->and($row['reserved_at'])->toBe('2026-03-14 16:00:00');
+    });
+
+    it('pops a delayed job on time with a non-UTC PHP default timezone on PostgreSQL', function (): void {
+        ['connection' => $connection, 'skipReason' => $skipReason] = pgsqlQueueConnection();
+
+        if ($connection === null) {
+            $this->markTestSkipped($skipReason);
+        }
+
+        $id = pgsqlQueue($connection, pgsqlZonedClock('2026-03-14T16:00:00Z', 'America/New_York'))
+            ->later(3600, new PrivateStateJob('secret', 'shared'));
+
+        $early = pgsqlQueue($connection, pgsqlZonedClock('2026-03-14T16:59:59Z', 'UTC'))->pop();
+        $due = pgsqlQueue($connection, pgsqlZonedClock('2026-03-14T17:00:00Z', 'UTC'))->pop();
+
+        expect($early)->toBeNull()
+            ->and($due?->id)->toBe($id);
+    });
+
+    it('reads failed_at back as the stored instant on PostgreSQL', function (): void {
+        ['connection' => $connection, 'skipReason' => $skipReason] = pgsqlQueueConnection();
+
+        if ($connection === null) {
+            $this->markTestSkipped($skipReason);
+        }
+
+        $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
+        $failedAt = new DateTimeImmutable('2026-11-01 01:50:00', new DateTimeZone('America/New_York'));
+        $repository->store(new FailedJob(
+            id: 'failed-instant',
+            queue: 'default',
+            payload: 'payload',
+            exception: 'RuntimeException: boom',
+            failedAt: $failedAt,
+        ));
+
+        $stored = $connection->query(
+            "SELECT to_char(failed_at, 'YYYY-MM-DD HH24:MI:SS') AS failed_at FROM failed_jobs",
+        )[0];
+
+        expect($stored['failed_at'])->toBe('2026-11-01 05:50:00')
+            ->and($repository->find('failed-instant')?->failedAt->getTimestamp())->toBe($failedAt->getTimestamp());
     });
 })->group('integration-services');

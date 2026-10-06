@@ -4,15 +4,23 @@ declare(strict_types=1);
 
 namespace Marko\Queue\Database;
 
-use DateTimeImmutable;
+use DateMalformedStringException;
+use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Queue\FailedJob;
 use Marko\Queue\FailedJobRepositoryInterface;
 
+/**
+ * Stores failed jobs in the failed_jobs table. failed_at is written and read in
+ * the database timezone (`database.timezone`, UTC by default), so the instant
+ * read back is the instant stored, whatever PHP default timezone either process
+ * runs in.
+ */
 class DatabaseFailedJobRepository implements FailedJobRepositoryInterface
 {
     public function __construct(
         private ConnectionInterface $connection,
+        private DatabaseTimezoneConfig $databaseTimezoneConfig,
     ) {}
 
     public function store(
@@ -25,10 +33,13 @@ class DatabaseFailedJobRepository implements FailedJobRepositoryInterface
             $failedJob->queue,
             $failedJob->payload,
             $failedJob->exception,
-            $failedJob->failedAt->format('Y-m-d H:i:s'),
+            $this->databaseTimezoneConfig->format($failedJob->failedAt),
         ]);
     }
 
+    /**
+     * @throws DateMalformedStringException
+     */
     public function all(): array
     {
         $sql = 'SELECT id, queue, payload, exception, failed_at FROM failed_jobs ORDER BY failed_at DESC';
@@ -37,6 +48,9 @@ class DatabaseFailedJobRepository implements FailedJobRepositoryInterface
         return array_map(fn (array $row): FailedJob => $this->hydrateFailedJob($row), $rows);
     }
 
+    /**
+     * @throws DateMalformedStringException
+     */
     private function hydrateFailedJob(
         array $row,
     ): FailedJob {
@@ -45,10 +59,13 @@ class DatabaseFailedJobRepository implements FailedJobRepositoryInterface
             queue: $row['queue'],
             payload: $row['payload'],
             exception: $row['exception'],
-            failedAt: new DateTimeImmutable($row['failed_at']),
+            failedAt: $this->databaseTimezoneConfig->parse($row['failed_at']),
         );
     }
 
+    /**
+     * @throws DateMalformedStringException
+     */
     public function find(
         string $id,
     ): ?FailedJob {

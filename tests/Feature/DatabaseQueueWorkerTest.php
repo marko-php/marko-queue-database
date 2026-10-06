@@ -7,6 +7,7 @@ use Marko\Core\Command\Input;
 use Marko\Core\Command\Output;
 use Marko\Core\Container\Container;
 use Marko\Core\Container\ContainerInterface;
+use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\PgSql\Query\PgSqlQueryBuilderFactory;
 use Marko\Database\Query\QueryBuilderFactoryInterface;
@@ -35,6 +36,7 @@ function workerTestContainer(
     $container->instance(ConnectionInterface::class, $connection);
     $container->instance(QueryBuilderFactoryInterface::class, new PgSqlQueryBuilderFactory($connection));
     $container->instance(ClockInterface::class, new FakeClock());
+    $container->instance(DatabaseTimezoneConfig::class, DatabaseTimezoneConfig::fromName('UTC'));
     $container->instance(ConfigRepositoryInterface::class, new FakeConfigRepository([
         'encryption.key' => 'worker-regression-key',
         'queue.driver' => 'database',
@@ -66,7 +68,7 @@ function skipBackoff(
 ): void {
     $connection->execute(
         'UPDATE jobs SET available_at = :now',
-        ['now' => new DateTimeImmutable('-1 second')->format('Y-m-d H:i:s')],
+        ['now' => new DateTimeImmutable('-1 second', new DateTimeZone('UTC'))->format('Y-m-d H:i:s')],
     );
 }
 

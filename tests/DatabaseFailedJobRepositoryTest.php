@@ -2,9 +2,11 @@
 
 declare(strict_types=1);
 
+use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Queue\Database\DatabaseFailedJobRepository;
+use Marko\Queue\Database\Tests\Fixtures\SqliteConnection;
 use Marko\Queue\FailedJob;
 use Marko\Queue\FailedJobRepositoryInterface;
 
@@ -73,14 +75,14 @@ function createMockConnection(
 test('DatabaseFailedJobRepository implements interface', function (): void {
     $connection = createMockConnection();
 
-    $repository = new DatabaseFailedJobRepository($connection);
+    $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
 
     expect($repository)->toBeInstanceOf(FailedJobRepositoryInterface::class);
 });
 
 test('DatabaseFailedJobRepository store saves failed job', function (): void {
     $connection = createMockConnection(executeResult: 1);
-    $repository = new DatabaseFailedJobRepository($connection);
+    $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
 
     $failedJob = new FailedJob(
         id: 'failed-123',
@@ -120,7 +122,7 @@ test('DatabaseFailedJobRepository all retrieves all failed jobs', function (): v
             ],
         ],
     ]);
-    $repository = new DatabaseFailedJobRepository($connection);
+    $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
 
     $failedJobs = $repository->all();
 
@@ -146,7 +148,7 @@ test('DatabaseFailedJobRepository find retrieves by ID', function (): void {
             ],
         ],
     ]);
-    $repository = new DatabaseFailedJobRepository($connection);
+    $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
 
     $failedJob = $repository->find('failed-123');
 
@@ -159,7 +161,7 @@ test('DatabaseFailedJobRepository find retrieves by ID', function (): void {
 
 test('DatabaseFailedJobRepository find returns null for non-existent ID', function (): void {
     $connection = createMockConnection(queryResults: [[]]);
-    $repository = new DatabaseFailedJobRepository($connection);
+    $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
 
     $failedJob = $repository->find('non-existent');
 
@@ -168,7 +170,7 @@ test('DatabaseFailedJobRepository find returns null for non-existent ID', functi
 
 test('DatabaseFailedJobRepository delete removes by ID', function (): void {
     $connection = createMockConnection(executeResult: 1);
-    $repository = new DatabaseFailedJobRepository($connection);
+    $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
 
     $result = $repository->delete('failed-123');
 
@@ -181,7 +183,7 @@ test('DatabaseFailedJobRepository delete removes by ID', function (): void {
 
 test('DatabaseFailedJobRepository delete returns false when ID not found', function (): void {
     $connection = createMockConnection();
-    $repository = new DatabaseFailedJobRepository($connection);
+    $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
 
     $result = $repository->delete('non-existent');
 
@@ -190,7 +192,7 @@ test('DatabaseFailedJobRepository delete returns false when ID not found', funct
 
 test('DatabaseFailedJobRepository clear removes all', function (): void {
     $connection = createMockConnection(executeResult: 5);
-    $repository = new DatabaseFailedJobRepository($connection);
+    $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
 
     $cleared = $repository->clear();
 
@@ -205,7 +207,7 @@ test('DatabaseFailedJobRepository count returns total', function (): void {
     $connection = createMockConnection(queryResults: [
         [['count' => 42]],
     ]);
-    $repository = new DatabaseFailedJobRepository($connection);
+    $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
 
     $count = $repository->count();
 
@@ -216,7 +218,7 @@ test('DatabaseFailedJobRepository count returns total', function (): void {
 
 test('DatabaseFailedJobRepository stores exception details', function (): void {
     $connection = createMockConnection(executeResult: 1);
-    $repository = new DatabaseFailedJobRepository($connection);
+    $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
 
     // Create a realistic exception message with stack trace details
     $exceptionMessage = "RuntimeException: Database connection failed\n"
@@ -253,4 +255,66 @@ test('DatabaseFailedJobRepository stores exception details', function (): void {
         ->and($bindings[$storedExceptionIndex])->toContain('Stack trace:')
         ->and($bindings[$storedExceptionIndex])->toContain('DatabaseQueue->pop()')
         ->and($bindings[$storedExceptionIndex])->toContain('Previous:');
+});
+
+describe('DatabaseFailedJobRepository database timezone', function (): void {
+    it('stores failed_at in the database timezone', function (): void {
+        $connection = createMockConnection(executeResult: 1);
+        $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
+
+        $repository->store(new FailedJob(
+            id: 'failed-ny',
+            queue: 'default',
+            payload: 'payload',
+            exception: 'RuntimeException: boom',
+            failedAt: new DateTimeImmutable('2026-03-14 11:09:26', new DateTimeZone('America/New_York')),
+        ));
+
+        expect($connection->executedStatements[0]['bindings'][4])->toBe('2026-03-14 15:09:26');
+    });
+
+    it('reads failed_at back as a time in the database timezone whatever the PHP default timezone', function (): void {
+        $connection = createMockConnection(queryResults: [[[
+            'id' => 'failed-ny',
+            'queue' => 'default',
+            'payload' => 'payload',
+            'exception' => 'RuntimeException: boom',
+            'failed_at' => '2026-03-14 15:09:26',
+        ]]]);
+        $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
+        $previous = date_default_timezone_get();
+        date_default_timezone_set('America/New_York');
+
+        try {
+            $failedJob = $repository->find('failed-ny');
+        } finally {
+            date_default_timezone_set($previous);
+        }
+
+        expect($failedJob->failedAt->getTimestamp())
+            ->toBe(new DateTimeImmutable('2026-03-14T15:09:26Z')->getTimestamp());
+    });
+
+    it('returns the same instant that was stored', function (): void {
+        $connection = SqliteConnection::withQueueTables();
+        $repository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('Asia/Tokyo'));
+        $failedAt = new DateTimeImmutable('2026-11-01 01:50:00', new DateTimeZone('America/New_York'));
+        $previous = date_default_timezone_get();
+        date_default_timezone_set('Europe/London');
+
+        try {
+            $repository->store(new FailedJob(
+                id: 'failed-round-trip',
+                queue: 'default',
+                payload: 'payload',
+                exception: 'RuntimeException: boom',
+                failedAt: $failedAt,
+            ));
+            $found = $repository->find('failed-round-trip');
+        } finally {
+            date_default_timezone_set($previous);
+        }
+
+        expect($found->failedAt->getTimestamp())->toBe($failedAt->getTimestamp());
+    });
 });

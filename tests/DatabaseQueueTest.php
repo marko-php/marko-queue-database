@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
@@ -34,6 +35,7 @@ function createTestQueue(
         jobEnvelope: $envelope ?? createTestEnvelope(),
         failedJobRepository: $failedJobRepository ?? new InMemoryFailedJobRepository(),
         clock: $clock,
+        databaseTimezoneConfig: DatabaseTimezoneConfig::fromName('UTC'),
         retryAfter: $retryAfter,
         maxAttempts: $maxAttempts,
     );

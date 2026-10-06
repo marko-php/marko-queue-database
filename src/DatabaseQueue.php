@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace Marko\Queue\Database;
 
 use DateTimeImmutable;
+use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\TransactionInterface;
 use Marko\Database\Exceptions\LockException;
@@ -42,6 +43,13 @@ use Random\RandomException;
  * reserving UPDATE is guarded on reserved_at as a second line of defence.
  * The query builder factory must build on the same connection the queue
  * uses, so the lock is taken inside the queue's transaction.
+ *
+ * Timestamps: the clock decides when something happens; DatabaseTimezoneConfig
+ * (`database.timezone`, UTC by default) decides how it is written. Every stored
+ * time and every cutoff it is compared with is converted to the database
+ * timezone first, so a web process and a worker that load different PHP default
+ * timezones agree, and DST changes never repeat or skip a stored hour (with the
+ * default UTC zone).
  */
 readonly class DatabaseQueue implements QueueInterface
 {
@@ -51,6 +59,7 @@ readonly class DatabaseQueue implements QueueInterface
         private FailedJobRepositoryInterface $failedJobRepository,
         private QueryBuilderFactoryInterface $queryBuilderFactory,
         private ClockInterface $clock,
+        private DatabaseTimezoneConfig $databaseTimezoneConfig,
         private string $table = 'jobs',
         private string $defaultQueue = 'default',
         private int $retryAfter = 90,
@@ -90,7 +99,7 @@ readonly class DatabaseQueue implements QueueInterface
         $job->setId($id);
 
         $now = $this->clock->now();
-        $availableAt = $delay > 0 ? $now->modify("+$delay seconds") : $now;
+        $availableAt = $this->secondsAfter($now, $delay);
 
         $this->connection->execute(
             "INSERT INTO $this->table (id, queue, payload, attempts, reserved_at, available_at, created_at) VALUES (:id, :queue, :payload, :attempts, :reserved_at, :available_at, :created_at)",
@@ -100,12 +109,25 @@ readonly class DatabaseQueue implements QueueInterface
                 'payload' => $this->jobEnvelope->wrap($job->serialize()),
                 'attempts' => $job->attempts,
                 'reserved_at' => null,
-                'available_at' => $availableAt->format('Y-m-d H:i:s'),
-                'created_at' => $now->format('Y-m-d H:i:s'),
+                'available_at' => $this->databaseTimezoneConfig->format($availableAt),
+                'created_at' => $this->databaseTimezoneConfig->format($now),
             ],
         );
 
         return $id;
+    }
+
+    /**
+     * The instant the given number of elapsed seconds after (or, when negative, before) $instant.
+     *
+     * Works on the Unix timestamp, not the wall clock: modify('-90 seconds') on a DST
+     * zone's wall time across a fall-back transition lands an hour off.
+     */
+    private function secondsAfter(
+        DateTimeImmutable $instant,
+        int $seconds,
+    ): DateTimeImmutable {
+        return $instant->setTimestamp($instant->getTimestamp() + $seconds);
     }
 
     /**
@@ -156,13 +178,16 @@ readonly class DatabaseQueue implements QueueInterface
         string $queueName,
     ): JobInterface|false|null {
         $now = $this->clock->now();
-        $reclaimCutoff = $now->modify("-$this->retryAfter seconds");
+        $reclaimCutoff = $this->secondsAfter($now, -$this->retryAfter);
 
         $row = $this->queryBuilderFactory->create()
             ->table($this->table)
             ->where('queue', '=', $queueName)
-            ->where('available_at', '<=', $now->format('Y-m-d H:i:s'))
-            ->whereRaw('(reserved_at IS NULL OR reserved_at <= ?)', [$reclaimCutoff->format('Y-m-d H:i:s')])
+            ->where('available_at', '<=', $this->databaseTimezoneConfig->format($now))
+            ->whereRaw(
+                '(reserved_at IS NULL OR reserved_at <= ?)',
+                [$this->databaseTimezoneConfig->format($reclaimCutoff)],
+            )
             ->orderBy('available_at')
             ->orderBy('created_at')
             ->lockForUpdate()
@@ -176,9 +201,9 @@ readonly class DatabaseQueue implements QueueInterface
         $affectedRows = $this->connection->execute(
             "UPDATE $this->table SET reserved_at = :reserved_at, attempts = attempts + 1 WHERE id = :id AND (reserved_at IS NULL OR reserved_at <= :reclaim_cutoff)",
             [
-                'reserved_at' => $now->format('Y-m-d H:i:s'),
+                'reserved_at' => $this->databaseTimezoneConfig->format($now),
                 'id' => $row['id'],
-                'reclaim_cutoff' => $reclaimCutoff->format('Y-m-d H:i:s'),
+                'reclaim_cutoff' => $this->databaseTimezoneConfig->format($reclaimCutoff),
             ],
         );
 
@@ -249,7 +274,7 @@ readonly class DatabaseQueue implements QueueInterface
             "SELECT COUNT(*) as count FROM $this->table WHERE queue = :queue AND reserved_at IS NULL AND available_at <= :now",
             [
                 'queue' => $queueName,
-                'now' => $now->format('Y-m-d H:i:s'),
+                'now' => $this->databaseTimezoneConfig->format($now),
             ],
         );
 
@@ -305,7 +330,7 @@ readonly class DatabaseQueue implements QueueInterface
         $job = $this->unwrapJob($rows[0]['payload'], (int) $rows[0]['attempts']);
 
         $now = $this->clock->now();
-        $availableAt = $delay > 0 ? $now->modify("+$delay seconds") : $now;
+        $availableAt = $this->secondsAfter($now, $delay);
 
         $affectedRows = $this->connection->execute(
             "UPDATE $this->table SET payload = :payload, attempts = :attempts, reserved_at = :reserved_at, available_at = :available_at WHERE id = :id",
@@ -313,7 +338,7 @@ readonly class DatabaseQueue implements QueueInterface
                 'payload' => $this->jobEnvelope->wrap($job->serialize()),
                 'attempts' => $job->attempts,
                 'reserved_at' => null,
-                'available_at' => $availableAt->format('Y-m-d H:i:s'),
+                'available_at' => $this->databaseTimezoneConfig->format($availableAt),
                 'id' => $jobId,
             ],
         );

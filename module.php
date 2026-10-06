@@ -3,6 +3,7 @@
 declare(strict_types=1);
 
 use Marko\Core\Container\ContainerInterface;
+use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Query\QueryBuilderFactoryInterface;
 use Marko\Queue\Database\DatabaseFailedJobRepository;
@@ -24,6 +25,7 @@ return [
                 failedJobRepository: $container->get(FailedJobRepositoryInterface::class),
                 queryBuilderFactory: $container->get(QueryBuilderFactoryInterface::class),
                 clock: $container->get(ClockInterface::class),
+                databaseTimezoneConfig: $container->get(DatabaseTimezoneConfig::class),
                 defaultQueue: $config->queue(),
                 retryAfter: $config->retryAfter(),
                 maxAttempts: $config->maxAttempts(),

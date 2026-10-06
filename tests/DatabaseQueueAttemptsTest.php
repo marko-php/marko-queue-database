@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\PgSql\Query\PgSqlQueryBuilderFactory;
 use Marko\Encryption\Config\EncryptionConfig;
 use Marko\Queue\Database\DatabaseFailedJobRepository;
@@ -27,9 +28,10 @@ function attemptsQueue(
     return new DatabaseQueue(
         connection: $connection,
         jobEnvelope: attemptsEnvelope(),
-        failedJobRepository: new DatabaseFailedJobRepository($connection),
+        failedJobRepository: new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC')),
         queryBuilderFactory: new PgSqlQueryBuilderFactory($connection),
         clock: new FakeClock(),
+        databaseTimezoneConfig: DatabaseTimezoneConfig::fromName('UTC'),
         maxAttempts: $maxAttempts,
     );
 }
@@ -100,7 +102,7 @@ describe('DatabaseQueue attempt persistence', function (): void {
     it('moves a job exhausted by crashed reservations to failed_jobs instead of returning it', function (): void {
         $connection = SqliteConnection::withQueueTables();
         $queue = attemptsQueue($connection, maxAttempts: 2);
-        $failedJobRepository = new DatabaseFailedJobRepository($connection);
+        $failedJobRepository = new DatabaseFailedJobRepository($connection, DatabaseTimezoneConfig::fromName('UTC'));
         $id = $queue->push(new TestJob('crashy'), 'emails');
 
         $queue->pop('emails');
