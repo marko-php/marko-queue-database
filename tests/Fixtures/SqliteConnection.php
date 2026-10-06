@@ -15,9 +15,22 @@ use Throwable;
 
 /**
  * In-memory SQLite connection for exercising the database queue against real SQL.
+ *
+ * The queue builds its SELECT with a driver query builder (the PostgreSQL one in
+ * these tests, whose quoting and LIMIT SQLite accepts). SQLite has no row locks:
+ * a write transaction locks the whole database. So query() records a trailing
+ * row-lock clause in $lockClauses, for tests to assert on, and drops it before
+ * running the statement.
  */
 class SqliteConnection implements ConnectionInterface, TransactionInterface
 {
+    /**
+     * Row-lock clauses (e.g. "FOR UPDATE SKIP LOCKED") stripped from queries, in order.
+     *
+     * @var list<string>
+     */
+    public array $lockClauses = [];
+
     private PDO $pdo;
 
     public function __construct()
@@ -53,6 +66,11 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
         string $sql,
         array $bindings = [],
     ): array {
+        if (preg_match('/ (FOR (?:UPDATE|SHARE)(?: SKIP LOCKED| NOWAIT)?)$/', $sql, $matches) === 1) {
+            $this->lockClauses[] = $matches[1];
+            $sql = substr($sql, 0, -strlen($matches[0]));
+        }
+
         $statement = $this->pdo->prepare($sql);
         $statement->execute($bindings);
 

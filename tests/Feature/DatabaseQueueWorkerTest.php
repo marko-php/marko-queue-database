@@ -8,6 +8,8 @@ use Marko\Core\Command\Output;
 use Marko\Core\Container\Container;
 use Marko\Core\Container\ContainerInterface;
 use Marko\Database\Connection\ConnectionInterface;
+use Marko\Database\PgSql\Query\PgSqlQueryBuilderFactory;
+use Marko\Database\Query\QueryBuilderFactoryInterface;
 use Marko\Queue\Command\WorkCommand;
 use Marko\Queue\Database\Tests\Fixtures\AlwaysFailingJob;
 use Marko\Queue\Database\Tests\Fixtures\SqliteConnection;
@@ -29,6 +31,7 @@ function workerTestContainer(
     $container = new Container();
     $container->instance(ContainerInterface::class, $container);
     $container->instance(ConnectionInterface::class, $connection);
+    $container->instance(QueryBuilderFactoryInterface::class, new PgSqlQueryBuilderFactory($connection));
     $container->instance(ConfigRepositoryInterface::class, new FakeConfigRepository([
         'encryption.key' => 'worker-regression-key',
         'queue.driver' => 'database',

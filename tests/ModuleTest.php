@@ -5,6 +5,8 @@ declare(strict_types=1);
 use Marko\Config\ConfigRepositoryInterface;
 use Marko\Core\Container\Container;
 use Marko\Database\Connection\ConnectionInterface;
+use Marko\Database\PgSql\Query\PgSqlQueryBuilderFactory;
+use Marko\Database\Query\QueryBuilderFactoryInterface;
 use Marko\Queue\Database\DatabaseFailedJobRepository;
 use Marko\Queue\Database\DatabaseQueue;
 use Marko\Queue\Database\Tests\Fixtures\SqliteConnection;
@@ -22,6 +24,7 @@ function queueDatabaseModuleContainer(
 ): Container {
     $container = new Container();
     $container->instance(ConnectionInterface::class, $connection);
+    $container->instance(QueryBuilderFactoryInterface::class, new PgSqlQueryBuilderFactory($connection));
     $container->instance(ConfigRepositoryInterface::class, new FakeConfigRepository([
         'encryption.key' => 'module-test-key',
         'queue.driver' => 'database',
@@ -109,4 +112,14 @@ test('module factory fails crash-exhausted jobs at the configured queue.max_atte
 
     expect($queue->pop())->toBeNull()
         ->and((int) $connection->query('SELECT COUNT(*) AS count FROM failed_jobs')[0]['count'])->toBe(1);
+});
+
+test('module factory builds the reservation query with the bound query builder factory', function (): void {
+    $connection = SqliteConnection::withQueueTables();
+    $queue = queueDatabaseModuleContainer($connection)->get(QueueInterface::class);
+    $queue->push(new TestJob());
+
+    $queue->pop();
+
+    expect($connection->lockClauses)->toBe(['FOR UPDATE SKIP LOCKED']);
 });

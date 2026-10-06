@@ -7,6 +7,8 @@ namespace Marko\Queue\Database;
 use DateTimeImmutable;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\TransactionInterface;
+use Marko\Database\Exceptions\LockException;
+use Marko\Database\Query\QueryBuilderFactoryInterface;
 use Marko\Queue\Exceptions\SerializationException;
 use Marko\Queue\FailedJob;
 use Marko\Queue\FailedJobRepositoryInterface;
@@ -32,6 +34,13 @@ use Random\RandomException;
  *   (job maxAttempts, or the queue default) is moved to the failed-job store
  *   instead of being returned, so a job that always crashes its worker cannot
  *   be retried forever.
+ *
+ * Reservation: pop() selects the next job with the query builder's
+ * lockForUpdate()->skipLocked() inside a transaction, so concurrent workers
+ * skip rows another worker has locked instead of waiting for them. The
+ * reserving UPDATE is guarded on reserved_at as a second line of defence.
+ * The query builder factory must build on the same connection the queue
+ * uses, so the lock is taken inside the queue's transaction.
  */
 readonly class DatabaseQueue implements QueueInterface
 {
@@ -39,6 +48,7 @@ readonly class DatabaseQueue implements QueueInterface
         private ConnectionInterface $connection,
         private JobEnvelope $jobEnvelope,
         private FailedJobRepositoryInterface $failedJobRepository,
+        private QueryBuilderFactoryInterface $queryBuilderFactory,
         private string $table = 'jobs',
         private string $defaultQueue = 'default',
         private int $retryAfter = 90,
@@ -115,7 +125,7 @@ readonly class DatabaseQueue implements QueueInterface
     }
 
     /**
-     * @throws SerializationException
+     * @throws LockException|SerializationException
      */
     public function pop(
         ?string $queue = null,
@@ -138,7 +148,7 @@ readonly class DatabaseQueue implements QueueInterface
      *
      * @return JobInterface|false|null the reserved job, null when none is available, or
      *                                 false when the reserved job was moved to failed jobs
-     * @throws SerializationException
+     * @throws LockException|SerializationException
      */
     private function reserveNext(
         string $queueName,
@@ -146,22 +156,20 @@ readonly class DatabaseQueue implements QueueInterface
         $now = new DateTimeImmutable();
         $reclaimCutoff = $now->modify("-$this->retryAfter seconds");
 
-        $skipLocked = $this->supportsSkipLocked() ? ' FOR UPDATE SKIP LOCKED' : '';
+        $row = $this->queryBuilderFactory->create()
+            ->table($this->table)
+            ->where('queue', '=', $queueName)
+            ->where('available_at', '<=', $now->format('Y-m-d H:i:s'))
+            ->whereRaw('(reserved_at IS NULL OR reserved_at <= ?)', [$reclaimCutoff->format('Y-m-d H:i:s')])
+            ->orderBy('available_at')
+            ->orderBy('created_at')
+            ->lockForUpdate()
+            ->skipLocked()
+            ->first();
 
-        $rows = $this->connection->query(
-            "SELECT * FROM $this->table WHERE queue = :queue AND (reserved_at IS NULL OR reserved_at <= :reclaim_cutoff) AND available_at <= :now ORDER BY available_at ASC, created_at ASC LIMIT 1$skipLocked",
-            [
-                'queue' => $queueName,
-                'now' => $now->format('Y-m-d H:i:s'),
-                'reclaim_cutoff' => $reclaimCutoff->format('Y-m-d H:i:s'),
-            ],
-        );
-
-        if ($rows === []) {
+        if ($row === null) {
             return null;
         }
-
-        $row = $rows[0];
 
         $affectedRows = $this->connection->execute(
             "UPDATE $this->table SET reserved_at = :reserved_at, attempts = attempts + 1 WHERE id = :id AND (reserved_at IS NULL OR reserved_at <= :reclaim_cutoff)",
@@ -227,14 +235,6 @@ readonly class DatabaseQueue implements QueueInterface
         }
 
         return $job;
-    }
-
-    private function supportsSkipLocked(): bool
-    {
-        return match ($this->connection->driverName()) {
-            'mysql', 'pgsql' => true,
-            default => false,
-        };
     }
 
     public function size(

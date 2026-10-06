@@ -8,6 +8,7 @@ use Marko\Core\Container\Container;
 use Marko\Core\Path\ProjectPaths;
 use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
+use Marko\Database\PgSql\Query\PgSqlQueryBuilderFactory;
 use Marko\Encryption\Config\EncryptionConfig;
 use Marko\Queue\Command\RetryCommand;
 use Marko\Queue\Database\DatabaseFailedJobRepository;
@@ -30,10 +31,15 @@ use Marko\Testing\Fake\FakeConfigRepository;
  */
 
 /**
+ * Connect to the test server. With $migrate (the default) the jobs and failed_jobs
+ * tables are dropped and recreated; pass false for a second connection to the
+ * same tables.
+ *
  * @return array{connection: ?PgSqlConnection, skipReason: ?string}
  */
-function pgsqlQueueConnection(): array
-{
+function pgsqlQueueConnection(
+    bool $migrate = true,
+): array {
     $host = getenv('DB_HOST');
 
     if ($host === false || $host === '') {
@@ -71,6 +77,10 @@ function pgsqlQueueConnection(): array
         ];
     }
 
+    if (!$migrate) {
+        return ['connection' => $connection, 'skipReason' => null];
+    }
+
     $connection->execute('DROP TABLE IF EXISTS jobs');
     $connection->execute('DROP TABLE IF EXISTS failed_jobs');
     new CreateJobsTable()->up($connection);
@@ -91,6 +101,7 @@ function pgsqlQueue(
         connection: $connection,
         jobEnvelope: pgsqlEnvelope(),
         failedJobRepository: new DatabaseFailedJobRepository($connection),
+        queryBuilderFactory: new PgSqlQueryBuilderFactory($connection),
         maxAttempts: 1,
     );
 }
@@ -155,5 +166,62 @@ describe('database queue on PostgreSQL', function (): void {
             ->and($retried->secret())->toBe('secret')
             ->and($retried->shared())->toBe('shared')
             ->and($retried->attempts)->toBe(0);
+    });
+
+    it('never hands the same job to two concurrent reservations on PostgreSQL', function (): void {
+        ['connection' => $workerA, 'skipReason' => $skipReason] = pgsqlQueueConnection();
+
+        if ($workerA === null) {
+            $this->markTestSkipped($skipReason);
+        }
+
+        ['connection' => $workerB] = pgsqlQueueConnection(migrate: false);
+        $first = pgsqlQueue($workerA)->push(new PrivateStateJob('first', 'shared'));
+        $second = pgsqlQueue($workerA)->push(new PrivateStateJob('second', 'shared'));
+
+        // Worker B fails fast instead of hanging if the SELECT ever waits on A's lock again.
+        $workerB->execute("SET lock_timeout = '2s'");
+
+        // Worker A's pop() nests in an open transaction, so its row lock is held while B pops.
+        $workerA->beginTransaction();
+
+        try {
+            $poppedByA = pgsqlQueue($workerA)->pop();
+            $poppedByB = pgsqlQueue($workerB)->pop();
+        } finally {
+            $workerA->rollback();
+            $workerB->disconnect();
+        }
+
+        expect($poppedByA?->id)->toBe($first)
+            ->and($poppedByB?->id)->toBe($second);
+    });
+
+    it('skips a locked job instead of waiting for it on PostgreSQL', function (): void {
+        ['connection' => $workerA, 'skipReason' => $skipReason] = pgsqlQueueConnection();
+
+        if ($workerA === null) {
+            $this->markTestSkipped($skipReason);
+        }
+
+        ['connection' => $workerB] = pgsqlQueueConnection(migrate: false);
+        pgsqlQueue($workerA)->push(new PrivateStateJob('only', 'shared'));
+        $workerB->execute("SET lock_timeout = '2s'");
+
+        $workerA->beginTransaction();
+
+        try {
+            $poppedByA = pgsqlQueue($workerA)->pop();
+            $startedAt = microtime(true);
+            $poppedByB = pgsqlQueue($workerB)->pop();
+            $waited = microtime(true) - $startedAt;
+        } finally {
+            $workerA->rollback();
+            $workerB->disconnect();
+        }
+
+        expect($poppedByA)->not->toBeNull()
+            ->and($poppedByB)->toBeNull()
+            ->and($waited)->toBeLessThan(1.0);
     });
 })->group('integration-services');

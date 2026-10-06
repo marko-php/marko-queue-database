@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 use Marko\Core\Container\ContainerInterface;
 use Marko\Database\Connection\ConnectionInterface;
+use Marko\Database\Query\QueryBuilderFactoryInterface;
 use Marko\Queue\Database\DatabaseFailedJobRepository;
 use Marko\Queue\Database\DatabaseQueue;
 use Marko\Queue\FailedJobRepositoryInterface;
@@ -20,6 +21,7 @@ return [
                 connection: $container->get(ConnectionInterface::class),
                 jobEnvelope: $container->get(JobEnvelope::class),
                 failedJobRepository: $container->get(FailedJobRepositoryInterface::class),
+                queryBuilderFactory: $container->get(QueryBuilderFactoryInterface::class),
                 defaultQueue: $config->queue(),
                 retryAfter: $config->retryAfter(),
                 maxAttempts: $config->maxAttempts(),

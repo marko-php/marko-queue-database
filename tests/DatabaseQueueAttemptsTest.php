@@ -2,6 +2,7 @@
 
 declare(strict_types=1);
 
+use Marko\Database\PgSql\Query\PgSqlQueryBuilderFactory;
 use Marko\Encryption\Config\EncryptionConfig;
 use Marko\Queue\Database\DatabaseFailedJobRepository;
 use Marko\Queue\Database\DatabaseQueue;
@@ -26,6 +27,7 @@ function attemptsQueue(
         connection: $connection,
         jobEnvelope: attemptsEnvelope(),
         failedJobRepository: new DatabaseFailedJobRepository($connection),
+        queryBuilderFactory: new PgSqlQueryBuilderFactory($connection),
         maxAttempts: $maxAttempts,
     );
 }
