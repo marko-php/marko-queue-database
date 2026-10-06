@@ -43,6 +43,7 @@ function workerTestContainer(
         'queue.connection' => 'default',
         'queue.queue' => 'default',
         'queue.retry_after' => 90,
+        'queue.timeout' => 0,
         'queue.max_attempts' => 3,
         ...$queueConfig,
     ]));
