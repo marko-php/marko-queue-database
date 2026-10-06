@@ -63,6 +63,11 @@ class MockConnection implements ConnectionInterface
     {
         return 'sqlite';
     }
+
+    public function supportsReturning(): bool
+    {
+        return false;
+    }
 }
 
 function createMockConnection(

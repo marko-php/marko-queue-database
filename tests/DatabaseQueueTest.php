@@ -414,6 +414,11 @@ test('DatabaseQueue uses transactions for pop', function () {
             return 'sqlite';
         }
 
+        public function supportsReturning(): bool
+        {
+            return false;
+        }
+
         public function beginTransaction(): void
         {
             $this->transactionCalls[] = ['operation' => 'beginTransaction'];

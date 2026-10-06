@@ -104,6 +104,11 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
         return 'sqlite';
     }
 
+    public function supportsReturning(): bool
+    {
+        return false;
+    }
+
     public function beginTransaction(): void
     {
         $this->pdo->beginTransaction();
