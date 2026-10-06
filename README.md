@@ -8,6 +8,8 @@ Database queue driver — stores and processes jobs in SQL tables with transacti
 composer require marko/queue-database
 ```
 
+Then run `marko db:migrate` to create the `jobs` and `failed_jobs` tables from the entities the package ships.
+
 ## Quick Example
 
 ```php

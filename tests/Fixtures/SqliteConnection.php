@@ -9,8 +9,6 @@ use LogicException;
 use Marko\Database\Connection\ConnectionInterface;
 use Marko\Database\Connection\StatementInterface;
 use Marko\Database\Connection\TransactionInterface;
-use Marko\Queue\Database\Migration\CreateFailedJobsTable;
-use Marko\Queue\Database\Migration\CreateJobsTable;
 use PDO;
 use Throwable;
 
@@ -43,13 +41,33 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
     }
 
     /**
-     * Create a connection with the jobs and failed_jobs tables migrated.
+     * Create a connection with the jobs and failed_jobs tables. SQLite is not a supported driver, so there is no
+     * generator to build them from the entities; this is the same DDL the MySQL and PostgreSQL generators write.
      */
     public static function withQueueTables(): self
     {
         $connection = new self();
-        new CreateJobsTable()->up($connection);
-        new CreateFailedJobsTable()->up($connection);
+        $connection->execute(<<<'SQL'
+            CREATE TABLE jobs (
+                id VARCHAR(36) PRIMARY KEY,
+                queue VARCHAR(255) NOT NULL DEFAULT 'default',
+                payload TEXT NOT NULL,
+                attempts INT NOT NULL DEFAULT 0,
+                reserved_at TIMESTAMP NULL,
+                available_at TIMESTAMP NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            SQL);
+        $connection->execute('CREATE INDEX idx_queue_available ON jobs (queue, available_at)');
+        $connection->execute(<<<'SQL'
+            CREATE TABLE failed_jobs (
+                id VARCHAR(36) PRIMARY KEY,
+                queue VARCHAR(255) NOT NULL,
+                payload TEXT NOT NULL,
+                exception TEXT NOT NULL,
+                failed_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            )
+            SQL);
 
         return $connection;
     }

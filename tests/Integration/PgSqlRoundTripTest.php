@@ -9,14 +9,15 @@ use Marko\Core\Path\ProjectPaths;
 use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\PgSql\Connection\PgSqlConnection;
+use Marko\Database\PgSql\Introspection\PgSqlIntrospector;
 use Marko\Database\PgSql\Query\PgSqlQueryBuilderFactory;
+use Marko\Database\PgSql\Sql\PgSqlGenerator;
 use Marko\Encryption\Config\EncryptionConfig;
 use Marko\Queue\Command\RetryCommand;
 use Marko\Queue\Database\DatabaseFailedJobRepository;
 use Marko\Queue\Database\DatabaseQueue;
-use Marko\Queue\Database\Migration\CreateFailedJobsTable;
-use Marko\Queue\Database\Migration\CreateJobsTable;
 use Marko\Queue\Database\Tests\Fixtures\PrivateStateJob;
+use Marko\Queue\Database\Tests\Fixtures\QueueTables;
 use Marko\Queue\FailedJob;
 use Marko\Queue\JobEnvelope;
 use Marko\Queue\QueueConfig;
@@ -35,8 +36,8 @@ use Marko\Testing\Fake\FakeConfigRepository;
 
 /**
  * Connect to the test server. With $migrate (the default) the jobs and failed_jobs
- * tables are dropped and recreated; pass false for a second connection to the
- * same tables.
+ * tables are dropped and recreated from the entities, as db:migrate builds them;
+ * pass false for a second connection to the same tables.
  *
  * @return array{connection: ?PgSqlConnection, skipReason: ?string}
  */
@@ -84,10 +85,8 @@ function pgsqlQueueConnection(
         return ['connection' => $connection, 'skipReason' => null];
     }
 
-    $connection->execute('DROP TABLE IF EXISTS jobs');
-    $connection->execute('DROP TABLE IF EXISTS failed_jobs');
-    new CreateJobsTable()->up($connection);
-    new CreateFailedJobsTable()->up($connection);
+    QueueTables::drop($connection);
+    QueueTables::create($connection, new PgSqlGenerator());
 
     return ['connection' => $connection, 'skipReason' => null];
 }
@@ -113,6 +112,34 @@ function pgsqlQueue(
 }
 
 describe('database queue on PostgreSQL', function (): void {
+    it('builds jobs and failed_jobs from the entities on PostgreSQL', function (): void {
+        ['connection' => $connection, 'skipReason' => $skipReason] = pgsqlQueueConnection();
+
+        if ($connection === null) {
+            $this->markTestSkipped($skipReason);
+        }
+
+        $introspector = new PgSqlIntrospector($connection);
+        $jobs = $introspector->getTable('jobs');
+
+        expect(array_map(fn ($index): string => $index->name, $jobs?->indexes ?? []))->toContain('idx_queue_available')
+            ->and($introspector->getTable('failed_jobs'))->not->toBeNull()
+            ->and(QueueTables::diff($introspector)->isEmpty())->toBeTrue();
+    });
+
+    it('diffs tables created from the documented DDL as empty on PostgreSQL', function (): void {
+        ['connection' => $connection, 'skipReason' => $skipReason] = pgsqlQueueConnection();
+
+        if ($connection === null) {
+            $this->markTestSkipped($skipReason);
+        }
+
+        QueueTables::drop($connection);
+        QueueTables::createFromDocumentedDdl($connection);
+
+        expect(new PgSqlGenerator()->generateUp(QueueTables::diff(new PgSqlIntrospector($connection))))->toBe([]);
+    });
+
     it(
         'round-trips a job with private and protected properties through push and pop on PostgreSQL',
         function (): void {

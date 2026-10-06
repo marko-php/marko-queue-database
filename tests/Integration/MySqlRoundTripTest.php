@@ -5,13 +5,14 @@ declare(strict_types=1);
 use Marko\Database\Config\DatabaseConfig;
 use Marko\Database\Config\DatabaseTimezoneConfig;
 use Marko\Database\MySql\Connection\MySqlConnection;
+use Marko\Database\MySql\Introspection\MySqlIntrospector;
 use Marko\Database\MySql\Query\MySqlQueryBuilderFactory;
+use Marko\Database\MySql\Sql\MySqlGenerator;
 use Marko\Encryption\Config\EncryptionConfig;
 use Marko\Queue\Database\DatabaseFailedJobRepository;
 use Marko\Queue\Database\DatabaseQueue;
-use Marko\Queue\Database\Migration\CreateFailedJobsTable;
-use Marko\Queue\Database\Migration\CreateJobsTable;
 use Marko\Queue\Database\Tests\Fixtures\PrivateStateJob;
+use Marko\Queue\Database\Tests\Fixtures\QueueTables;
 use Marko\Queue\FailedJob;
 use Marko\Queue\JobEnvelope;
 use Marko\Testing\Fake\FakeClock;
@@ -25,13 +26,15 @@ use Marko\Testing\Fake\FakeConfigRepository;
  */
 
 /**
- * Connect to the test server with fresh jobs and failed_jobs tables.
+ * Connect to the test server with fresh jobs and failed_jobs tables, built from the entities as db:migrate builds
+ * them. With $create false, the tables are only dropped.
  *
  * @return array{connection: ?MySqlConnection, skipReason: ?string}
  * @throws RuntimeException When MARKO_INTEGRATION_REQUIRED is set and MySQL is not configured
  */
-function mysqlQueueConnection(): array
-{
+function mysqlQueueConnection(
+    bool $create = true,
+): array {
     $host = getenv('MARKO_TEST_MYSQL_HOST') ?: '';
 
     if ($host === '') {
@@ -54,10 +57,11 @@ function mysqlQueueConnection(): array
     ]));
 
     $connection->connect();
-    $connection->execute('DROP TABLE IF EXISTS jobs');
-    $connection->execute('DROP TABLE IF EXISTS failed_jobs');
-    new CreateJobsTable()->up($connection);
-    new CreateFailedJobsTable()->up($connection);
+    QueueTables::drop($connection);
+
+    if ($create) {
+        QueueTables::create($connection, new MySqlGenerator());
+    }
 
     return ['connection' => $connection, 'skipReason' => null];
 }
@@ -78,6 +82,51 @@ function mysqlQueue(
         databaseTimezoneConfig: DatabaseTimezoneConfig::fromName('UTC'),
     );
 }
+
+describe('database queue tables on MySQL', function (): void {
+    it('builds jobs and failed_jobs from the entities on MySQL', function (): void {
+        ['connection' => $connection, 'skipReason' => $skipReason] = mysqlQueueConnection();
+
+        if ($connection === null) {
+            $this->markTestSkipped($skipReason);
+        }
+
+        $introspector = new MySqlIntrospector($connection, getenv('MARKO_TEST_MYSQL_DATABASE') ?: 'marko_test');
+
+        try {
+            $jobs = $introspector->getTable('jobs');
+            $failedJobs = $introspector->getTable('failed_jobs');
+            $diff = QueueTables::diff($introspector);
+        } finally {
+            $connection->disconnect();
+        }
+
+        expect(array_map(fn ($index): string => $index->name, $jobs?->indexes ?? []))->toContain('idx_queue_available')
+            ->and($failedJobs)->not->toBeNull()
+            ->and($diff->isEmpty())->toBeTrue();
+    });
+
+    it('diffs tables created from the documented DDL as empty on MySQL', function (): void {
+        ['connection' => $connection, 'skipReason' => $skipReason] = mysqlQueueConnection(create: false);
+
+        if ($connection === null) {
+            $this->markTestSkipped($skipReason);
+        }
+
+        try {
+            QueueTables::createFromDocumentedDdl($connection);
+            $diff = QueueTables::diff(
+                new MySqlIntrospector($connection, getenv('MARKO_TEST_MYSQL_DATABASE') ?: 'marko_test'),
+            );
+            $statements = new MySqlGenerator()->generateUp($diff);
+        } finally {
+            QueueTables::drop($connection);
+            $connection->disconnect();
+        }
+
+        expect($statements)->toBe([]);
+    });
+})->group('integration-services');
 
 describe('database queue timestamps on MySQL with a non-UTC PHP default timezone', function (): void {
     beforeEach(function (): void {
