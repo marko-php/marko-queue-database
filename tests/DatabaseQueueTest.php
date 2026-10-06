@@ -18,7 +18,7 @@ use Marko\Queue\JobEnvelope;
 use Marko\Queue\QueueInterface;
 use Marko\Testing\Fake\FakeClock;
 use Marko\Testing\Fake\FakeConfigRepository;
-use PHPUnit\Framework\MockObject\MockObject;
+use PHPUnit\Framework\MockObject\Stub;
 use Psr\Clock\ClockInterface;
 
 function createTestQueue(
@@ -52,14 +52,14 @@ function createTestEnvelope(
  * it reports an open transaction and runs the callback.
  */
 function runsTransactions(
-    MockObject $connection,
+    Stub $connection,
 ): void {
     $connection->method('inTransaction')->willReturn(true);
     $connection->method('transaction')->willReturnCallback(fn (callable $callback): mixed => $callback());
 }
 
 test('DatabaseQueue implements QueueInterface', function () {
-    $connection = $this->createMock(ConnectionInterface::class);
+    $connection = $this->createStub(ConnectionInterface::class);
     $queue = createTestQueue($connection);
 
     expect($queue)->toBeInstanceOf(QueueInterface::class);
@@ -93,7 +93,7 @@ test('DatabaseQueue push stores job in database', function () {
 });
 
 test('DatabaseQueue push returns job ID', function () {
-    $connection = $this->createMock(ConnectionInterface::class);
+    $connection = $this->createStub(ConnectionInterface::class);
     $connection->method('execute')->willReturn(1);
 
     $job = new TestJob('test message');
@@ -552,7 +552,7 @@ test('DatabaseQueue respects available_at for delayed jobs', function () {
 
 test('it verifies the envelope before unserializing in DatabaseQueue::pop()', function (): void {
     $envelope = createTestEnvelope();
-    $connection = $this->createMockForIntersectionOfInterfaces(
+    $connection = $this->createStubForIntersectionOfInterfaces(
         [ConnectionInterface::class, TransactionInterface::class],
     );
     runsTransactions($connection);
@@ -584,7 +584,7 @@ test('it verifies the envelope before unserializing in DatabaseQueue::pop()', fu
 
 test('it rejects a tampered DatabaseQueue payload before unserializing', function (): void {
     $envelope = createTestEnvelope();
-    $connection = $this->createMockForIntersectionOfInterfaces(
+    $connection = $this->createStubForIntersectionOfInterfaces(
         [ConnectionInterface::class, TransactionInterface::class],
     );
     runsTransactions($connection);
@@ -615,7 +615,7 @@ it(
     'counts exactly one attempt per execution (popping then processing a job once yields attempts == 1, not 2)',
     function (): void {
         $envelope = createTestEnvelope();
-        $connection = $this->createMockForIntersectionOfInterfaces(
+        $connection = $this->createStubForIntersectionOfInterfaces(
             [ConnectionInterface::class, TransactionInterface::class],
         );
         runsTransactions($connection);
@@ -740,7 +740,7 @@ it(
     'reserves a job atomically so a second concurrent pop() of the same queue does not return the already-reserved job (affected-rows guard returns null on race loss)',
     function (): void {
         $envelope = createTestEnvelope();
-        $connection = $this->createMockForIntersectionOfInterfaces(
+        $connection = $this->createStubForIntersectionOfInterfaces(
             [ConnectionInterface::class, TransactionInterface::class],
         );
         runsTransactions($connection);
