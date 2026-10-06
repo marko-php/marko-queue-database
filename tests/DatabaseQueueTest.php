@@ -419,6 +419,12 @@ test('DatabaseQueue uses transactions for pop', function () {
             return false;
         }
 
+        public function quoteIdentifier(
+            string $identifier,
+        ): string {
+            return '"' . str_replace('"', '""', $identifier) . '"';
+        }
+
         public function beginTransaction(): void
         {
             $this->transactionCalls[] = ['operation' => 'beginTransaction'];

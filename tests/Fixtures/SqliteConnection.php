@@ -109,6 +109,12 @@ class SqliteConnection implements ConnectionInterface, TransactionInterface
         return false;
     }
 
+    public function quoteIdentifier(
+        string $identifier,
+    ): string {
+        return '"' . str_replace('"', '""', $identifier) . '"';
+    }
+
     public function beginTransaction(): void
     {
         $this->pdo->beginTransaction();
